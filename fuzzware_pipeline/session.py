@@ -2,7 +2,7 @@ import os
 import shutil
 import subprocess
 import time
-from os.path import isfile, join
+from os.path import isfile, join, exists
 
 from fuzzware_harness.tracing.serialization import (parse_bbl_set,
                                                     parse_mmio_trace)
@@ -21,13 +21,15 @@ from .naming_conventions import (SESS_DIRNAME_BASE_INPUTS,
                                  SESS_FILENAME_PREFIX_INPUT_ORIG,
                                  SESS_FILENAME_TEMP_BBL_SET,
                                  SESS_FILENAME_TEMP_MMIO_TRACE,
-                                 SESS_FILENAME_TEMP_PREFIX_INPUT)
+                                 SESS_FILENAME_TEMP_PREFIX_INPUT,
+                                 SESS_FILENAME_CUR_INPUT)
 from .observers.new_fuzz_input_handler import NewFuzzInputHandler
 from .observers.new_trace_file_handler import NewTraceFileHandler
 from .run_fuzzer import run_corpus_minimizer
 from .run_target import gen_run_arglist, run_target
 from .util.config import save_config, save_extra_args
 from .util.files import copy_prefix_to, first_file, prepend_to_all
+from .util.eval_utils import parse_afl_fuzzer_stats
 from .workers.tracegen import gen_traces
 
 logger = logging_handler().get_logger("pipeline")
@@ -290,6 +292,10 @@ class Session:
                 run_target(self.config_path, first_file(self.base_input_dir), self.extra_runtime_args + [ "-v" ])
                 logger.warning("[TRIAGING STEP 2] ... Output end\n")
 
+                logger.warning("\n\n[TRIAGING STEP 3] Re-running single emulation run with .cur_input file, showing its output...")
+                run_target(self.config_path, self.fuzzer_cur_input_path(instance.inst_num), self.extra_runtime_args + [ "-v" ])
+                logger.warning("[TRIAGING STEP 3] ... Output end\n")
+
                 return False
 
         logger.info("Fuzzers started up, setting up listeners for input generation")
@@ -397,6 +403,9 @@ class Session:
     def fuzzer_queue_dir(self, fuzzer_no: int) -> str:
         return join(self.fuzzer_instance_dir(fuzzer_no), 'queue')
 
+    def fuzzer_cur_input_path(self, fuzzer_no: int) -> str:
+        return join(self.fuzzer_instance_dir(fuzzer_no), SESS_FILENAME_CUR_INPUT)
+
     def fuzzer_input_paths(self, fuzzer_no: int):
         """
         Generates a list of input paths for the given fuzzer instance (index is 1-based as done per fuzzer naming convention)
@@ -409,18 +418,18 @@ class Session:
 
     def get_execs_per_sec(self, fuzzer_no: int):
         fuzzer_stats_file = self.get_fuzzer_stats_file(fuzzer_no)
-        try:
-            with open(fuzzer_stats_file, "r") as f:
-                stats = f.readlines()
-                try:
-                    curr_execs_per_sec = float(stats[5].strip("\n").split(":")[1][1:])
-                    start_time = float(stats[0].strip("\n").split(":")[1][1:])
-                    last_update_time = float(stats[1].strip("\n").split(":")[1][1:])
-                    total_execs = float(stats[4].strip("\n").split(":")[1][1:])
-
-                    overall_execs_per_sec = total_execs / (last_update_time - start_time)
-                except (ValueError, Exception):
-                    curr_execs_per_sec, overall_execs_per_sec = 0, 0
-        except FileNotFoundError:
+        if not exists(fuzzer_stats_file):
             curr_execs_per_sec, overall_execs_per_sec = 0, 0
+        else:
+            fuzzer_stats = parse_afl_fuzzer_stats(fuzzer_stats_file)
+            try:
+                curr_execs_per_sec = float(fuzzer_stats["execs_per_sec"])
+                start_time = float(fuzzer_stats["start_time"])
+                last_update_time = float(fuzzer_stats["last_update"])
+                total_execs = float(fuzzer_stats["execs_done"])
+
+                overall_execs_per_sec = total_execs / (last_update_time - start_time)
+            except (ValueError, Exception):
+                curr_execs_per_sec, overall_execs_per_sec = 0, 0
+
         return curr_execs_per_sec, overall_execs_per_sec
