@@ -6,6 +6,7 @@ import re
 import subprocess
 import sys
 import time
+import multiprocessing as mp
 from datetime import datetime
 
 from . import naming_conventions as nc
@@ -734,6 +735,20 @@ KNOWN_STATNAMES = [
     STATNAME_COV, STATNAME_MMIO_COSTS, STATNAME_MMIO_OVERHEAD_ELIM,
     STATNAME_CRASH_CONTEXTS, STATNAME_CRASH_TIMINGS
 ]
+
+
+def multi_run_target_manager(args_list: list):
+    with mp.Pool() as pool:
+        pool.starmap(run_target_wrapper, args_list)
+
+
+def run_target_wrapper(config_path, input_path, extra_args, get_output=False, silent=False, result_queue=None):
+    from .run_target import run_target
+    # emu_output = str(run_target(config_path, crashing_input, extra_args, get_output=True, silent=True))
+    result_queue.put(
+        (input_path, str(run_target(config_path, input_path, extra_args, get_output=get_output, silent=silent))))
+
+
 def do_genstats(args, leftover_args):
     from .util.config import load_config_deep
     from .workers.tracegen import gen_all_missing_traces
@@ -890,15 +905,37 @@ def do_genstats(args, leftover_args):
         for main_dir in main_dirs_for_proj(projdir):
             logger.info(f"Crash contexts from main dir: {main_dir}")
             config_path = None
-
+            results_dict = {}
+            args_tuple_list = []
+            m = mp.Manager()
+            results_queue = m.Queue()
+            iterator = 0
+            num_processed = 0
             for crashing_input in nc.crash_paths_for_main_dir(main_dir):
+                # continue
                 if config_path is None:
                     config_path = config_for_input_path(crashing_input)
                     extra_args_file = extra_args_for_config_path(config_path)
                     extra_args = parse_extra_args(load_extra_args(extra_args_file), projdir)
                     if "-v" not in extra_args:
                         extra_args += ["-v"]
-                emu_output = str(run_target(config_path, crashing_input, extra_args, get_output=True, silent=True))
+                # emu_output = str(run_target(config_path, crashing_input, extra_args, get_output=True, silent=True))
+                args_tuple_list.append([config_path, crashing_input, extra_args, True, True, results_queue])
+                iterator += 1
+
+            p = mp.Process(target=multi_run_target_manager, args=(args_tuple_list,))
+            p.start()
+            while num_processed < iterator:
+                result = results_queue.get(block=True)
+                results_dict[result[0]] = result[1]
+                num_processed += 1
+            p.join()
+            # print(results_dict)
+            # exit()
+
+            for crashing_input in nc.crash_paths_for_main_dir(main_dir):
+
+                emu_output = results_dict[crashing_input]
                 pc, lr = pc_lr_from_emu_output(emu_output)
                 crashing_input = str(Path(crashing_input).relative_to(projdir))
 
@@ -908,6 +945,7 @@ def do_genstats(args, leftover_args):
 
                 crash_contexts.setdefault((pc, lr), []).append(crashing_input)
                 logger.info(f"Got (pc, lr) = ({pc:#010x}, {lr:#010x}) for the following input path: {crashing_input}")
+
 
         crash_context_out_path = os.path.join(projdir, nc.PIPELINE_DIRNAME_STATS, nc.STATS_FILENAME_CRASH_CONTEXTS)
         dump_crash_contexts(crash_context_out_path, crash_contexts)

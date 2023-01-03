@@ -6,7 +6,7 @@ import subprocess
 import time
 import uuid
 from pathlib import Path
-
+import multiprocessing as mp
 import rq
 from fuzzware_pipeline.logging_handler import logging_handler
 from rq.worker import WorkerStatus
@@ -16,14 +16,14 @@ from ..run_target import gen_run_arglist, run_target
 from ..util.config import load_extra_args, parse_extra_args
 
 logger = logging_handler().get_logger("tracegen")
-
+MULTI = True
 FORKSRV_FD = 198
 
 # Make sure these names are synchronized with the argument names below
 ARGNAME_BBL_SET_PATH, ARGNAME_MMIO_SET_PATH = "bbl_set_path", "mmio_set_path"
 ARGNAME_EXTRA_ARGS = "extra_args"
 FORKSERVER_UNSUPPORTED_TRACE_ARGS = ("mmio_trace_path", "bbl_trace_path", "ram_trace_path")
-def gen_traces(config_path, input_path, bbl_trace_path=None, ram_trace_path=None, mmio_trace_path=None, bbl_set_path=None, mmio_set_path=None, extra_args=None, silent=False, bbl_hash_path=None):
+def gen_traces(config_path, input_path, bbl_trace_path=None, ram_trace_path=None, mmio_trace_path=None, bbl_set_path=None, mmio_set_path=None, extra_args=None, silent=False, bbl_hash_path=None,queue=None):
     extra_args = list(extra_args) if extra_args else []
 
     if bbl_trace_path is not None:
@@ -40,6 +40,7 @@ def gen_traces(config_path, input_path, bbl_trace_path=None, ram_trace_path=None
         extra_args += ["--bb-hash-out", bbl_hash_path]
 
     run_target(config_path, input_path, extra_args, silent=silent, stdout=subprocess.DEVNULL if silent else None, stderr=subprocess.DEVNULL if silent else None)
+    queue.put(1)
     return True
 
 def batch_gen_native_traces(config_path, input_paths, extra_args=None, bbl_set_paths=None, mmio_set_paths=None, bbl_hash_paths=None, silent=False):
@@ -66,6 +67,11 @@ def batch_gen_native_traces(config_path, input_paths, extra_args=None, bbl_set_p
             assert(False)
 
     gentrace_proc.destroy()
+
+def multi_proc_manager(function=None,arg_tuple_list=[]):
+    with mp.Pool() as p:
+        p.starmap(function, arg_tuple_list)
+
 
 def gen_missing_maindir_traces(maindir, required_trace_prefixes, fuzzer_nums=None, tracedir_postfix="", log_progress=False, verbose=False, crashing_inputs=False):
     projdir = nc.project_base(maindir)
@@ -143,21 +149,27 @@ def gen_missing_maindir_traces(maindir, required_trace_prefixes, fuzzer_nums=Non
         if log_progress:
             logger.info(f"Generating traces took {time.time() - start_time:.02f} seconds for {len(input_paths)} input(s)")
     else:
+        m = mp.Manager()
+        processed_queue=m.Queue()
         num_processed = 0
+        job_args_multi = []
+        iteration = 0
         for input_path, bbl_trace_path, ram_trace_path, mmio_trace_path, bbl_set_path, mmio_set_path, bbl_hash_path in jobs_for_config:
-            gen_traces(str(config_path), str(input_path),
-                bbl_trace_path=bbl_trace_path, ram_trace_path=ram_trace_path, mmio_trace_path=mmio_trace_path,
-                bbl_set_path=bbl_set_path, mmio_set_path=mmio_set_path, bbl_hash_path=bbl_hash_path,
-                extra_args=extra_args, silent=not verbose
-            )
-            num_processed += 1
-
+            job_args_multi.append((str(config_path), str(input_path), bbl_trace_path, ram_trace_path, mmio_trace_path,
+                                   bbl_set_path, mmio_set_path, extra_args, not verbose, bbl_hash_path, processed_queue))
+            iteration += 1
+        p = mp.Process(target=multi_proc_manager, args=(gen_traces,job_args_multi))
+        p.start()
+        while num_processed < iteration:
+            num_processed+=processed_queue.get(block=True,timeout=100)
             if log_progress:
                 if num_processed > 0 and num_processed % 50 == 0:
                     time_passed = round(time.time() - start_time)
-                    relative_done = (num_processed+1) / num_gentrace_jobs
+                    relative_done = (num_processed + 1) / num_gentrace_jobs
                     time_estimated = round((relative_done ** (-1)) * time_passed)
-                    logger.info(f"[*] Processed {num_processed}/{num_gentrace_jobs} in {time_passed} seconds. Estimated seconds remaining: {time_estimated-time_passed}")
+                    logger.info(
+                        f"[*] Processed {num_processed}/{num_gentrace_jobs} in {time_passed} seconds. Estimated seconds remaining: {time_estimated - time_passed}")
+        p.join()
 
 def gen_all_missing_traces(projdir, trace_name_prefixes=None, log_progress=False, verbose=False, crashing_inputs=False):
     if trace_name_prefixes is None:
