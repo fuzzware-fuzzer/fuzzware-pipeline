@@ -214,14 +214,14 @@ def add_missing_regions(existing_mem_config, add_entries):
                     if end > next_start:
                         # We got a collision. Is it dynamically added?
                         if DYNAMICALLY_ADDED_REGION_NAME_PREFIX in next_region_name:
-                            logger.warn(f"While extending forward, collided with dynamically added region {next_region_name}, consuming it")
+                            logger.warning(f"While extending forward, collided with dynamically added region {next_region_name}, consuming it")
                             consumed_region_names.add(next_region_name)
                             next_end = next_start + existing_mem_config[next_region_name]['size']
 
                             end = max(end, next_end)
                             del existing_mem_config[next_region_name]
                         else:
-                            logger.warn("While extending forward, collided with next region, setting end to other region's start")
+                            logger.warning("While extending forward, collided with next region, setting end to other region's start")
                             end = next_start
 
                 append_size = end - other_end
