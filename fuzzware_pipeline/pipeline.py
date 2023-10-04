@@ -14,7 +14,7 @@ from fuzzware_harness.tracing.serialization import (parse_bbl_set,
                                                     parse_mmio_set)
 from fuzzware_harness.util import (_merge_dict, load_config_deep,
                                    parse_address_value, parse_symbols,
-                                   resolve_region_file_paths)
+                                   resolve_region_file_paths, guess_symbol)
 from watchdog.observers import Observer
 
 from . import util
@@ -295,8 +295,7 @@ class Pipeline:
                     if pc != MMIO_HOOK_PC_ALL_ACCESS_SITES:
                         self.num_models_per_pc[pc] = self.num_models_per_pc.get(pc, 0) + 1
 
-        name_to_addr, _ = parse_symbols(config_map)
-        self.symbols = name_to_addr
+        self.symbols, self.syms_by_addr = parse_symbols(config_map)
         self.default_config_map = config_map
         self.parse_pipeline_yml_config(config_map)
         self.parse_ground_truth_files()
@@ -652,13 +651,17 @@ class Pipeline:
                             logger.info(f"Found {len(new_bbs)} new translation / basic block{'s' if len(new_bbs) > 1 else ''}!")
                             time_latest_new_basic_block = time.time()
                             for pc in new_bbs:
+                                sym = guess_symbol(self.syms_by_addr, pc)
+                                sym_suffix = ""
+                                if sym:
+                                    sym_suffix=f" ({sym})"
                                 if self.groundtruth_valid_basic_blocks and pc in self.groundtruth_valid_basic_blocks:
                                     self.visited_valid_basic_blocks.add(pc)
-                                    logger.info(f"New basic block: 0x{pc:08x}")
+                                    logger.info(f"New basic block: 0x{pc:08x}{sym_suffix}")
                                 else:
-                                    logger.info(f"New translation block: 0x{pc:08x}")
+                                    logger.info(f"New translation block: 0x{pc:08x}{sym_suffix}")
                                 if self.groundtruth_milestone_basic_blocks and pc in self.groundtruth_milestone_basic_blocks:
-                                    logger.info(f"Discovered milestone basic block: 0x{pc:08x}")
+                                    logger.info(f"Discovered milestone basic block: 0x{pc:08x}{sym_suffix}")
                                     self.visited_milestone_basic_blocks.add(pc)
                             self.visited_translation_blocks |= new_bbs
 
