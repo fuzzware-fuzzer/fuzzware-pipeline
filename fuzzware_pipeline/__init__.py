@@ -900,14 +900,15 @@ def do_genstats(args, leftover_args):
                         extra_args += ["-v"]
                 emu_output = str(run_target(config_path, crashing_input, extra_args, get_output=True, silent=True))
                 pc, lr = pc_lr_from_emu_output(emu_output)
-                crashing_input = str(Path(crashing_input).relative_to(projdir))
+                # path to input relative to parent of project dir
+                rel_crashing_input = str(Path(crashing_input).relative_to(os.path.dirname(projdir)))
 
                 if pc is None:
-                    logger.warning(f"An input does not reproduce a crash: {crashing_input}")
+                    logger.warning(f"An input does not reproduce a crash: {rel_crashing_input}")
                     continue
 
-                crash_contexts.setdefault((pc, lr), []).append(crashing_input)
-                logger.info(f"Got (pc, lr) = ({pc:#010x}, {lr:#010x}) for the following input path: {crashing_input}")
+                crash_contexts.setdefault((pc, lr), []).append(rel_crashing_input)
+                logger.info(f"Got (pc, lr) = ({pc:#010x}, {lr:#010x}) for the following input path: {rel_crashing_input}")
 
         crash_context_out_path = os.path.join(projdir, nc.PIPELINE_DIRNAME_STATS, nc.STATS_FILENAME_CRASH_CONTEXTS)
         dump_crash_contexts(crash_context_out_path, crash_contexts)
