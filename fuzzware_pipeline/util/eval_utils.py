@@ -147,9 +147,17 @@ def valid_bbs_for_proj(projdir, valid_bb_path=None):
                 return None
     return parse_valid_bb_file(valid_bb_path)
 
-def parse_milestone_bb_file(milestone_bb_path):
+def parse_milestone_bb_file(milestone_bb_path, symbols):
     with open(milestone_bb_path, "r") as f:
-        return [int(l, 16) for l in f.readlines() if l.strip()]
+        out = []
+        for l in f.readlines():
+            s = l.strip()
+            if s:
+                try:
+                    out+=[int(s, 16)]
+                except ValueError:
+                    out+=[symbols[s]]
+        return out
 
 def dump_milestone_discovery_timings(out_path, discovery_timings, milestone_bbs):
     with open(out_path, "w") as f:

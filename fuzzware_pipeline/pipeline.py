@@ -227,7 +227,7 @@ class Pipeline:
 
         milestone_bb_list_path = self.milestone_basic_block_list_path
         if os.path.exists(milestone_bb_list_path):
-            self.groundtruth_milestone_basic_blocks = parse_milestone_bb_file(milestone_bb_list_path)
+            self.groundtruth_milestone_basic_blocks = parse_milestone_bb_file(milestone_bb_list_path, self.symbols)
 
     def __init__(self, parent_dir, name, base_inputs, num_main_fuzzer_procs, disable_modeling=False, write_worker_logs=False, do_full_tracing=False, config_name=SESS_FILENAME_CONFIG, timeout_seconds=0, use_aflpp=False):
         self.booted_bbl = DEFAULT_IDLE_BBL

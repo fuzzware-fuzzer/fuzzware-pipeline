@@ -798,7 +798,7 @@ def do_genstats(args, leftover_args):
             exit(1)
 
         if os.path.exists(args.milestone_bb_file):
-            milestone_bbs = parse_milestone_bb_file(args.milestone_bb_file)
+            milestone_bbs = parse_milestone_bb_file(args.milestone_bb_file, self.symbols)
             not_yet_found_milestone_bbs = set(milestone_bbs)
 
         logger.info("Generating missing basic block set traces, if any")
