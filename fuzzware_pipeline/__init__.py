@@ -21,7 +21,7 @@ from .naming_conventions import (PIPELINE_DIRNAME_STATS, VENV_NAME_MODELING,
                                  trace_paths_for_input, trace_paths_for_main_dir, valid_basic_block_list_path_for_proj)
 from .util.config import load_extra_args, parse_extra_args
 from .util.eval_utils import (collect_covered_basic_blocks, valid_bbs_for_proj,
-                                find_traces_covering_all)
+                                find_traces_covering_all, resolve_all)
 
 
 
@@ -360,19 +360,6 @@ def existing_path(path):
     if not os.path.exists(path):
         raise argparse.ArgumentTypeError("Path '{}' does not exist".format(path))
     return path
-
-def resolve_all(symbols, basic_blocks):
-    from fuzzware_harness.util import parse_address_value
-    bbs = []
-
-    for bb in basic_blocks:
-        try:
-            val=int(bb, 16) & (~1)
-        except ValueError:
-            val=parse_address_value(symbols, bb)
-        bbs.append(val)
-
-    return bbs
 
 MODE_REPLAY = 'replay'
 def do_replay(args, leftover_args):
