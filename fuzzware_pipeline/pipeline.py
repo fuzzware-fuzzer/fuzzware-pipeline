@@ -14,7 +14,7 @@ from fuzzware_harness.tracing.serialization import (parse_bbl_set,
                                                     parse_mmio_set)
 from fuzzware_harness.util import (_merge_dict, load_config_deep,
                                    parse_address_value, parse_symbols,
-                                   resolve_region_file_paths, guess_symbol)
+                                   resolve_region_file_paths, closest_symbol)
 from watchdog.observers import Observer
 
 from . import util
@@ -651,7 +651,7 @@ class Pipeline:
                             logger.info(f"Found {len(new_bbs)} new translation / basic block{'s' if len(new_bbs) > 1 else ''}!")
                             time_latest_new_basic_block = time.time()
                             for pc in new_bbs:
-                                sym = guess_symbol(self.syms_by_addr, pc)
+                                sym = closest_symbol(self.syms_by_addr, pc)[0]
                                 sym_suffix = ""
                                 if sym:
                                     sym_suffix=f" ({sym})"
