@@ -38,14 +38,15 @@ def check_cpu_availability(num_local_fuzzer_instances):
 
 def check_afl_requirements():
     check_failed = False
-    try:
-        with open("/proc/sys/kernel/core_pattern", "rb") as f:
-            contents = f.read(1)
-            if len(contents) == 1 and contents == b'|':
-                logger.error("Failed: core_pattern check")
-                check_failed = True
-    except FileNotFoundError:
-        pass
+    if os.getenv("AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES") is None:
+        try:
+            with open("/proc/sys/kernel/core_pattern", "rb") as f:
+                contents = f.read(1)
+                if len(contents) == 1 and contents == b'|':
+                    logger.error("Failed: core_pattern check")
+                    check_failed = True
+        except FileNotFoundError:
+            pass
 
     if os.getenv("AFL_SKIP_CPUFREQ") is None:
         try:
