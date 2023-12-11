@@ -160,7 +160,7 @@ def resolve_all(symbols, basic_blocks):
 
     return bbs
 
-def parse_milestone_bb_file(milestone_bb_path, symbols):
+def parse_milestone_bb_file(milestone_bb_path, symbols={}):
     with open(milestone_bb_path, "r") as f:
         # skip empty lines and lines starting with #
         return resolve_all(symbols, [l.strip() for l in f.readlines() if l.strip() and not l.startswith("#")])
