@@ -264,6 +264,9 @@ def derive_input_file_times_from_afl_plot_data(project_base_dir, crashes=False):
                     stat_seconds = stat_seconds + fuzzer_start_time
                 if prev_stat_seconds is None:
                     prev_stat_seconds = stat_seconds
+                # plot_data may indicate more inputs than are actually available
+                stat_num_input_files = min(stat_num_input_files, len(input_paths))
+
                 # Distribute the timings of input paths across the interval since the last entry
                 num_inputs_since_prev = stat_num_input_files - prev_num_input_files
                 num_seconds_since_prev = stat_seconds - prev_stat_seconds
