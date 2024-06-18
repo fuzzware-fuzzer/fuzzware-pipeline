@@ -604,9 +604,10 @@ def do_cov(args, leftover_args):
         trace_paths = find_traces_covering_all(projdir, specific_bbs, excluded_bbs, args.num_matches, args.skip_num, not args.all_main_dirs, search_crashes=args.crashes)
 
         if trace_paths:
+            working_directory = os.getcwd()
             print(f"\nFound {len(trace_paths):d} inputs covering all specified addresses:")
             for i, path in enumerate(trace_paths):
-                print(f"{i+1:d}. {Path(nc.input_for_trace_path(path)).relative_to(projdir)}")
+                print(f"{i+1:d}. {Path(nc.input_for_trace_path(path)).relative_to(working_directory)}")
         else:
             print("Could not find any traces (after skipping) that cover all requested bbs...")
     else:
