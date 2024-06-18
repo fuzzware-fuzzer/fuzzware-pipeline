@@ -901,7 +901,7 @@ def do_genstats(args, leftover_args):
                         extra_args += ["-v"]
                 emu_output = str(run_target(config_path, crashing_input, extra_args, get_output=True, silent=True))
                 pc, lr = pc_lr_from_emu_output(emu_output)
-                # path to input relative to parent of project dir
+                # path to input relative to current working directory
                 rel_crashing_input = str(Path(crashing_input).relative_to(os.path.dirname(working_directory)))
 
                 if pc is None:
