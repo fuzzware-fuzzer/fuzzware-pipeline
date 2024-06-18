@@ -887,6 +887,7 @@ def do_genstats(args, leftover_args):
         from .run_target import run_target
         from .util.eval_utils import dump_crash_contexts
         crash_contexts = {}
+        working_directory = os.getcwd()
         for main_dir in main_dirs_for_proj(projdir):
             logger.info(f"Crash contexts from main dir: {main_dir}")
             config_path = None
@@ -901,7 +902,7 @@ def do_genstats(args, leftover_args):
                 emu_output = str(run_target(config_path, crashing_input, extra_args, get_output=True, silent=True))
                 pc, lr = pc_lr_from_emu_output(emu_output)
                 # path to input relative to parent of project dir
-                rel_crashing_input = str(Path(crashing_input).relative_to(os.path.dirname(projdir)))
+                rel_crashing_input = str(Path(crashing_input).relative_to(os.path.dirname(working_directory)))
 
                 if pc is None:
                     logger.warning(f"An input does not reproduce a crash: {rel_crashing_input}")
