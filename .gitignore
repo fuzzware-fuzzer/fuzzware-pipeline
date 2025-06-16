@@ -5,6 +5,7 @@
 # Build Files
 build
 dist
+dma_modeling/target
 
 # Binary files
 *.pyc

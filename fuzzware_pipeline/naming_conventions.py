@@ -15,6 +15,8 @@ RQ_DUMP_FILE = "dump.rdb"
 REDIS_QUEUE_NAME_TRACE_GEN_JOBS = "tracegen" # Any jobs regarding generation of
 REDIS_QUEUE_NAME_STATE_GEN_JOBS = "stategen"
 REDIS_QUEUE_NAME_MODELING = "modeling"
+REDIS_QUEUE_NAME_DMA_GEN_SNIPPET = "dma_snippet_gen"
+REDIS_QUEUE_NAME_DMA_MODELING = "dma_modeling"
 
 PREFIX_BASIC_BLOCK_TRACE = "bbl_"
 PREFIX_RAM_TRACE = "ram_"
@@ -22,9 +24,11 @@ PREFIX_MMIO_TRACE = "mmio_"
 PREFIX_BASIC_BLOCK_SET = "bblset_"
 PREFIX_BASIC_BLOCK_HASH = "bblhash_"
 PREFIX_MMIO_SET = "mmioset_"
+PREFIX_INTERRUPT_TRACE = "int_"
+PREFIX_DMA_TRACE = "dma_"
 SET_TRACE_FILENAME_PREFIXES = (PREFIX_BASIC_BLOCK_SET, PREFIX_MMIO_SET)
-NATIVE_TRACE_FILENAME_PREFIXES = (PREFIX_BASIC_BLOCK_SET, PREFIX_MMIO_SET, PREFIX_BASIC_BLOCK_HASH)
-TRACE_FILENAME_PREFIXES = (PREFIX_BASIC_BLOCK_TRACE, PREFIX_RAM_TRACE, PREFIX_MMIO_TRACE, PREFIX_BASIC_BLOCK_SET, PREFIX_MMIO_SET, PREFIX_BASIC_BLOCK_HASH)
+NATIVE_TRACE_FILENAME_PREFIXES = (PREFIX_BASIC_BLOCK_SET, PREFIX_MMIO_SET, PREFIX_BASIC_BLOCK_HASH, PREFIX_BASIC_BLOCK_TRACE, PREFIX_RAM_TRACE, PREFIX_MMIO_TRACE, PREFIX_INTERRUPT_TRACE, PREFIX_DMA_TRACE)
+TRACE_FILENAME_PREFIXES = (PREFIX_BASIC_BLOCK_TRACE, PREFIX_RAM_TRACE, PREFIX_MMIO_TRACE, PREFIX_BASIC_BLOCK_SET, PREFIX_MMIO_SET, PREFIX_BASIC_BLOCK_HASH, PREFIX_INTERRUPT_TRACE, PREFIX_DMA_TRACE)
 PREFIX_STATEFILE = "access_state"
 
 # parent dir naming conventions
@@ -34,9 +38,11 @@ DEFAULT_FILENAME_SYMS_YML = "syms.yml"
 
 # pipeline naming conventions
 PIPELINE_FILENAME_MMIO_MODEL_CFG = "mmio_config.yml"
+PIPELINE_FILENAME_DMA_CFG = "dma_config.yml"
 PIPELINE_FILENAME_EXIT_AT_CFG = "exit_at_config.yml"
 PIPELINE_FILENAME_MAIN_CFG_SNIPPETS = "main_config_snippets.yml"
 PIPELINE_FILENAME_JOB_TIMINGS = "job_timings.txt"
+PIPELINE_FILENAME_DMA_SNIPGEN_PERF_STATS = "dma_perf_stats.txt"
 PIPELINE_FILENAME_INPUT_CREATION_TIMINGS = "input_creation_timings.txt"
 PIPELINE_FILENAME_CRASH_CREATION_TIMINGS = "crash_creation_timings.txt"
 PIPELINE_FILENAME_WARNINGS = "WARNINGS.txt"
@@ -45,6 +51,7 @@ PIPELINE_FILENAME_VALID_BB_LIST = "valid_basic_blocks.txt"
 PIPELINE_FILENAME_CHECKPOINT_BBS = "milestone_bbs.txt"
 PIPELINE_FILENAME_RUNTIME_LOG = "runtime.txt"
 PIPELINE_FILENAME_MILESTONE_LOG = "milestone.log"
+PIPELINE_FILENAME_DMA_MODEL_PERF_METADATA = "perf_meta.csv"
 
 STATS_FILENAME_COVERAGE_OVER_TIME = "covered_bbs_by_second_into_experiment.csv"
 STATS_FILENAME_MILESTONE_DISCOVERY_TIMINGS = "milestone_discovery_timings.csv"
@@ -57,6 +64,7 @@ PIPELINE_DIRNAME_MMIO_STATES = "mmio_states"
 PIPELINE_DIRNAME_CONFIG_SNIPPETS = "config_snippets"
 PIPELINE_DIRNAME_LOGS = "logs"
 PIPELINE_DIRNAME_STATS = "stats"
+PIPELINE_DIRNAME_DMA_SNIPPETS = "dma_snippets"
 
 # replaytest naming convention
 REPLAY_TEST_DIRECTORY = "replaytest_data"
@@ -70,11 +78,13 @@ SESS_DIRNAME_TEMP_MINIMIZATION = "base_inputs_non_minimized"
 SESS_DIRNAME_QUEUE = "queue"
 SESS_DIRNAME_CRASHES = "crashes"
 SESS_DIRNAME_NECESSARY_FILES = "data"
+SESS_DIRNAME_DMA_CFG_CANDIDATES = "dma_cfg_candidates"
 SESS_FILENAME_CONFIG = BASEDIR_FILENAME_CONFIG
 SESS_FILENAME_STATE = "base.state"
 SESS_FILENAME_EXTRA_ARGS = "extra_args.txt"
 SESS_FILENAME_PREFIX_INPUT = "prefix_input"
 SESS_FILENAME_PREFIX_INPUT_ORIG = "prefix_input.orig"
+SESS_FILENAME_PREFIX_DMA_CFG_CANDIDATE = "dma_cfg_candidate"
 SESS_FILENAME_TEMP_BBL_SET = "bbl_set_prefix_candidate"
 SESS_FILENAME_TEMP_MMIO_TRACE = "mmio_trace_prefix_candidate"
 SESS_FILENAME_TEMP_PREFIX_INPUT = ".tmp_prefix_input"
@@ -178,7 +188,8 @@ def trace_paths_for_input(input_path):
         trace_for_input_path(input_path, PREFIX_MMIO_TRACE),
         trace_for_input_path(input_path, PREFIX_BASIC_BLOCK_SET),
         trace_for_input_path(input_path, PREFIX_MMIO_SET),
-        trace_for_input_path(input_path, PREFIX_BASIC_BLOCK_HASH),
+        trace_for_input_path(input_path, PREFIX_INTERRUPT_TRACE),
+        trace_for_input_path(input_path, PREFIX_DMA_TRACE),
     )
 
 def trace_paths_for_trace(trace_path):
@@ -187,7 +198,9 @@ def trace_paths_for_trace(trace_path):
         related_trace_path(trace_path, PREFIX_RAM_TRACE),
         related_trace_path(trace_path, PREFIX_MMIO_TRACE),
         related_trace_path(trace_path, PREFIX_BASIC_BLOCK_SET),
-        related_trace_path(trace_path, PREFIX_MMIO_SET)
+        related_trace_path(trace_path, PREFIX_MMIO_SET),
+        related_trace_path(trace_path, PREFIX_INTERRUPT_TRACE),
+        related_trace_path(trace_path, PREFIX_DMA_TRACE),
     )
 
 def set_paths_for_trace(trace_path):
@@ -204,6 +217,9 @@ def empty_input_path(project_path):
 
 def job_timings_file_path(project_path):
     return os.path.join(project_path, PIPELINE_DIRNAME_STATS, PIPELINE_FILENAME_JOB_TIMINGS)
+
+def dma_snipgen_perf_file_path(project_path):
+    return os.path.join(project_path, PIPELINE_DIRNAME_STATS, PIPELINE_FILENAME_DMA_SNIPGEN_PERF_STATS)
 
 def input_creation_timings_path(project_path):
     return os.path.join(project_path, PIPELINE_DIRNAME_STATS, PIPELINE_FILENAME_INPUT_CREATION_TIMINGS)
@@ -283,6 +299,23 @@ def trace_paths_for_main_dir(main_dir_path, trace_prefix, crash_paths=False):
 def crash_paths_for_main_dir(main_dir_path):
     return input_paths_for_main_dir(main_dir_path, crashes=True)
 
+def dma_cfg_candidate_paths_for_main_dir(main_dir_path):
+    return sorted(Path(main_dir_path).joinpath(SESS_DIRNAME_DMA_CFG_CANDIDATES).glob(SESS_FILENAME_PREFIX_DMA_CFG_CANDIDATE+"*"))
+
+def dma_cfg_candidate_path_for_num(main_dir_path, candidate_num):
+    return os.path.join(main_dir_path, SESS_DIRNAME_DMA_CFG_CANDIDATES, SESS_FILENAME_PREFIX_DMA_CFG_CANDIDATE + f"_{candidate_num:04d}")
+
+def dma_snippet_path_for_proj(proj_dir_path, out_snippet_dir_suffix=""):
+    return os.path.join(proj_dir_path, PIPELINE_DIRNAME_DMA_SNIPPETS + out_snippet_dir_suffix)
+
+def dma_snippet_path_for_input_path(input_path: str, proj_dir_path=None, out_snippet_dir_suffix=""):
+    _, session_name, fuzzer_instance_name, input_type, input_filename = get_input_path_components(input_path)
+
+    if proj_dir_path is None:
+        proj_dir_path = project_base(input_path)
+
+    return os.path.join(dma_snippet_path_for_proj(proj_dir_path, out_snippet_dir_suffix) , "_".join((session_name, fuzzer_instance_name, input_type, input_filename)))
+
 def fuzzer_dirs_for_main_dir(main_dir_path):
     return sorted(Path(main_dir_path).joinpath(SESS_DIRNAME_FUZZERS).glob("*"))
 
@@ -326,6 +359,11 @@ def queue_or_input_path_for_name(fuzzer_dir, filename):
 def is_trace_filename(filename):
     return any([filename.startswith(prefix) for prefix in TRACE_FILENAME_PREFIXES])
 
+def is_project_base_dir(path):
+    # Search for different names to be more forgiving with partially copied projects
+    return any(os.path.exists(os.path.join(path, name)) for name in
+               (PIPELINE_DIRNAME_CONFIG_SNIPPETS, "main001", PIPELINE_DIRNAME_MMIO_STATES, PIPELINE_DIRNAME_STATS))
+
 def project_base(path):
     if not os.path.exists(path):
         print("[project_base] [-] base path does not exist")
@@ -333,10 +371,9 @@ def project_base(path):
     path = os.path.abspath(path)
 
     while path:
-        # Search for different names to be more forgiving with partially copied projects
-        for name in (PIPELINE_DIRNAME_CONFIG_SNIPPETS, "main001", PIPELINE_DIRNAME_MMIO_STATES, PIPELINE_DIRNAME_STATS):
-            if os.path.exists(os.path.join(path, name)):
-                return path
+        if is_project_base_dir(path):
+            return path
+
         path, filename = os.path.split(path)
         if path == "/" and not filename:
             break

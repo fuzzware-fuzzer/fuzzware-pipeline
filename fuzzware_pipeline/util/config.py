@@ -182,3 +182,11 @@ def merge_model_conflict(model_type, existing_entry, new_entry):
         existing_entry['mask'] |= new_entry['mask']
         return True
     return False
+
+def add_dma_config(config_map, dma_config_map):
+    periph_config = config_map.setdefault("peripherals", {})
+    for periph_name, periph_entry in dma_config_map.get("peripherals", {}).items():
+        if periph_name not in periph_config:
+            periph_config[periph_name] = copy.deepcopy(periph_entry)
+        else:
+            logger.warning(f"Could not add auto-generated DMA peripheral '{periph_name}' to config as it already exists.")

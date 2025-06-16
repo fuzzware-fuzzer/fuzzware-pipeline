@@ -1,0 +1,20 @@
+include:
+- config.yml
+
+peripherals:
+  my_dma_periph:
+    class: fuzzware_harness.peripherals.generic_dma.GenericDMAC
+    packet_limit: 5
+
+    descriptors:
+    - addr: 0x50008008 # PDMA_DAR0: PDMA Transfer Destination Address Register
+      to:
+        type: buffer
+      known_values:
+        # 0x200000b8
+        - dma_buf
+
+    known_sizes:
+      dma_buf:
+        min: 8
+        max: 8

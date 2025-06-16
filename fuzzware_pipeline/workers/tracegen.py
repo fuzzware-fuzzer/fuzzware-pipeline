@@ -1,12 +1,12 @@
+import copy
 import datetime
+import math
 import os
-from re import sub
-import signal
 import subprocess
-import time
 import uuid
 from pathlib import Path
-from multiprocessing import Pool, Value
+from multiprocessing import Pool
+from tqdm import tqdm
 
 import rq
 from fuzzware_pipeline.logging_handler import logging_handler
@@ -21,10 +21,13 @@ logger = logging_handler().get_logger("tracegen")
 FORKSRV_FD = 198
 
 # Make sure these names are synchronized with the argument names below
-ARGNAME_BBL_SET_PATH, ARGNAME_MMIO_SET_PATH = "bbl_set_path", "mmio_set_path"
+ARGNAME_BBL_SET_PATH, ARGNAME_MMIO_SET_PATH, ARGNAME_BBL_HASH_PATH = "bbl_set_path", "mmio_set_path", "bbl_hash_path"
+ARGNAME_BBL_TRACE_PATH, ARGNAME_RAM_TRACE_PATH, ARGNAME_MMIO_TRACE_PATH = "bbl_trace_path", "ram_trace_path", "mmio_trace_path"
+ARGNAME_INTERRUPT_TRACE_PATH = "interrupt_trace_path"
+ARGNAME_DMA_TRACE_PATH = "dma_trace_path"
 ARGNAME_EXTRA_ARGS = "extra_args"
-FORKSERVER_UNSUPPORTED_TRACE_ARGS = ("mmio_trace_path", "bbl_trace_path", "ram_trace_path")
-def gen_traces(config_path, input_path, bbl_trace_path=None, ram_trace_path=None, mmio_trace_path=None, bbl_set_path=None, mmio_set_path=None, extra_args=None, silent=False, bbl_hash_path=None):
+FORKSERVER_UNSUPPORTED_TRACE_ARGS = ("dma_trace_path", )
+def gen_traces(config_path, input_path, bbl_trace_path=None, ram_trace_path=None, mmio_trace_path=None, bbl_set_path=None, mmio_set_path=None, extra_args=None, silent=False, bbl_hash_path=None, interrupt_trace_path=None, dma_trace_path=None):
     extra_args = list(extra_args) if extra_args else []
 
     if bbl_trace_path is not None:
@@ -39,59 +42,38 @@ def gen_traces(config_path, input_path, bbl_trace_path=None, ram_trace_path=None
         extra_args += ["--mmio-set-out", mmio_set_path]
     if bbl_hash_path is not None:
         extra_args += ["--bb-hash-out", bbl_hash_path]
+    if interrupt_trace_path is not None:
+        extra_args += ["--interrupt-trace-out", interrupt_trace_path]
+    if dma_trace_path is not None:
+        extra_args += ["--dma-trace-out", dma_trace_path]
 
     run_target(config_path, input_path, extra_args, silent=silent, stdout=subprocess.DEVNULL if silent else None, stderr=subprocess.DEVNULL if silent else None)
     return True
 
-def batch_gen_native_traces(config_path, input_paths, extra_args=None, bbl_set_paths=None, mmio_set_paths=None, bbl_hash_paths=None, silent=False):
-    """
-    Utility function to generate batches of traces that the emulator
-    supports native snapshotting for.
-    """
-    common_length = len(input_paths)
-
-    # Spawn process, while disabling generation types where we can
-    gentrace_proc = TraceGenProc(config_path, extra_args, silent=silent,
-        gen_bb_set=(not bbl_set_paths) is False and not all(p is None for p in bbl_set_paths),
-        gen_mmio_set=(not mmio_set_paths) is False and not all(p is None for p in mmio_set_paths),
-        gen_bb_hash=(not bbl_hash_paths) is False and not all(p is None for p in bbl_hash_paths)
-    )
-
-    bbl_set_paths = bbl_set_paths or common_length * [None]
-    mmio_set_paths = mmio_set_paths or common_length * [None]
-    bbl_hash_paths = bbl_hash_paths or common_length * [None]
-
-    for input_path, bbl_set_path, mmio_set_path, bbl_hash_path in zip(input_paths, bbl_set_paths, mmio_set_paths, bbl_hash_paths):
-        if not gentrace_proc.gen_trace(input_path, bbl_set_path, mmio_set_path, bbl_hash_path):
-            logger.error(f"Hit abrupt end while trying to execute input {input_path}")
-            assert(False)
-
-    gentrace_proc.destroy()
-
-# the number of completed tracegen jobs
-# shared over processes, so it needs a lock
-num_processed = None
-
-def init(args):
-    ''' store the counter for later use '''
-    global num_processed 
-    num_processed = args
-
-
-def gen_missing_maindir_traces(maindir, required_trace_prefixes, fuzzer_nums=None, tracedir_postfix="", log_progress=False, verbose=False, crashing_inputs=False, force_overwrite=False, num_emulators=1):
+def gen_missing_maindir_traces(maindir, required_trace_prefixes, fuzzer_nums=None, tracedir_postfix="", log_progress=False, verbose=False, crashing_inputs=False, force_overwrite=False, num_emulators=1, force_process_per_input=False, force_slow_tracing=False):
     projdir = nc.project_base(maindir)
     config_path = nc.config_file_for_main_path(maindir)
     extra_args = parse_extra_args(load_extra_args(nc.extra_args_for_config_path(config_path)), projdir)
 
-    jobs_for_config = []
+    if force_slow_tracing:
+        extra_args.append("--force-slow-tracing")
+
+    trace_jobs = []
     fuzzer_dirs = nc.fuzzer_dirs_for_main_dir(maindir)
 
     if fuzzer_nums is not None:
         assert all(0 < i <= len(fuzzer_dirs) for i in fuzzer_nums)
         fuzzer_dirs = [fuzzer_dirs[i-1] for i in fuzzer_nums]
 
-    can_use_native_batch = all(prefix in nc.NATIVE_TRACE_FILENAME_PREFIXES for prefix in required_trace_prefixes)
-    num_gentrace_jobs = 0
+    can_use_forkserver = False
+    if not force_process_per_input and not force_slow_tracing:
+        can_use_forkserver = all(prefix in nc.NATIVE_TRACE_FILENAME_PREFIXES for prefix in required_trace_prefixes)
+
+    need_bb_set, need_mmio_set, need_bb_hash = False, False, False
+    need_bb_trace, need_ram_trace, need_mmio_trace = False, False, False
+    need_interrupt_trace = False
+    need_dma_trace = False
+
     for fuzzer_dir in fuzzer_dirs:
         tracedir = fuzzer_dir.joinpath(nc.trace_dirname(tracedir_postfix, is_crash=crashing_inputs))
 
@@ -106,6 +88,8 @@ def gen_missing_maindir_traces(maindir, required_trace_prefixes, fuzzer_nums=Non
         for input_path in nc.input_paths_for_fuzzer_dir(fuzzer_dir, crashes=crashing_inputs):
             bbl_trace_path, ram_trace_path, mmio_trace_path = None, None, None
             bbl_set_path, mmio_set_path, bbl_hash_path = None, None, None
+            interrupt_trace_path = None
+            dma_trace_path = None
             for trace_path in nc.trace_paths_for_input(input_path):
                 trace_dir, trace_name = os.path.split(trace_path)
 
@@ -116,74 +100,83 @@ def gen_missing_maindir_traces(maindir, required_trace_prefixes, fuzzer_nums=Non
                     if trace_name.startswith(prefix) and not os.path.exists(trace_path):
                         if prefix == nc.PREFIX_BASIC_BLOCK_TRACE:
                             bbl_trace_path = trace_path
+                            need_bb_trace = True
                         elif prefix == nc.PREFIX_MMIO_TRACE:
                             mmio_trace_path = trace_path
+                            need_mmio_trace = True
                         elif prefix == nc.PREFIX_RAM_TRACE:
                             ram_trace_path = trace_path
+                            need_ram_trace = True
                         elif prefix == nc.PREFIX_BASIC_BLOCK_SET:
                             bbl_set_path = trace_path
+                            need_bb_set = True
                         elif prefix == nc.PREFIX_MMIO_SET:
                             mmio_set_path = trace_path
+                            need_mmio_set = True
                         elif prefix == nc.PREFIX_BASIC_BLOCK_HASH:
                             bbl_hash_path = trace_path
+                            need_bb_hash = True
+                        elif prefix == nc.PREFIX_INTERRUPT_TRACE:
+                            interrupt_trace_path = trace_path
+                            need_interrupt_trace = True
+                        elif prefix == nc.PREFIX_DMA_TRACE:
+                            dma_trace_path = trace_path
+                            need_dma_trace = True
                         else:
                             assert False
                         break
 
-            if any(p is not None for p in (bbl_trace_path, ram_trace_path, mmio_trace_path, bbl_set_path, mmio_set_path, bbl_hash_path)):
-                num_gentrace_jobs += 1
-                if can_use_native_batch:
-                    # This is ugly, but this way we don't need to pivot the lists later
-                    if not jobs_for_config:
-                        jobs_for_config = [[], [], [], []]
-                    jobs_for_config[0].append(input_path)
-                    jobs_for_config[1].append(bbl_set_path)
-                    jobs_for_config[2].append(mmio_set_path)
-                    jobs_for_config[3].append(bbl_hash_path)
-                else:
-                    jobs_for_config.append((str(input_path), bbl_trace_path, ram_trace_path, mmio_trace_path, bbl_set_path, mmio_set_path, bbl_hash_path))
+            if any(p is not None for p in (bbl_trace_path, ram_trace_path, mmio_trace_path, bbl_set_path, mmio_set_path, bbl_hash_path, interrupt_trace_path, dma_trace_path)):
+                trace_jobs.append((str(input_path), bbl_trace_path, ram_trace_path, mmio_trace_path, bbl_set_path, mmio_set_path, bbl_hash_path, interrupt_trace_path, dma_trace_path))
 
     # If we found jobs for the given config path, add them
-    if not jobs_for_config:
+    if not trace_jobs:
         if log_progress:
             logger.info("No traces to generate for main path")
-        return
+        return 0
 
-    start_time = time.time()
-    # after here, starting time is never written
-    if can_use_native_batch:
-        input_paths, bbl_set_paths, mmio_set_paths, bbl_hash_paths = jobs_for_config
-        batch_gen_native_traces(config_path, input_paths, extra_args, bbl_set_paths, mmio_set_paths, bbl_hash_paths, not verbose)
-        if log_progress:
-            logger.info(f"Generating traces took {time.time() - start_time:.02f} seconds for {len(input_paths)} input(s)")
+    if can_use_forkserver:
+        pool_init_func, pool_worker_func = pool_init_forkserver_worker, pool_func_gen_traces_forkserver
+        pool_init_args = verbose, str(config_path), extra_args, need_bb_set, need_mmio_set, need_bb_hash, need_bb_trace, need_ram_trace, need_mmio_trace, need_interrupt_trace, dma_trace_path
     else:
-        # jobs for config does not have all information we need for a run
-        # but we want everything in a list for mp.map
-        args = []
-        global num_processed 
-        num_processed = Value('i', 0)
-        for input_path, bbl_trace_path, ram_trace_path, mmio_trace_path, bbl_set_path, mmio_set_path, bbl_hash_path in jobs_for_config:
-            args.append((str(config_path), str(input_path), bbl_trace_path, ram_trace_path, mmio_trace_path, bbl_set_path, mmio_set_path, bbl_hash_path, extra_args, verbose, start_time, log_progress, num_gentrace_jobs))
-        with Pool(num_emulators, init, (num_processed,)) as p:
-            p.map(gen_traces_wrapper, args)
+        pool_init_func, pool_worker_func = pool_init_non_native, pool_func_gen_traces_new_proc
+        pool_init_args = verbose, str(config_path), extra_args
 
-def gen_traces_wrapper(job):
-    config_path, input_path, bbl_trace_path, ram_trace_path, mmio_trace_path, bbl_set_path, mmio_set_path, bbl_hash_path, extra_args, verbose, start_time, log_progress, num_gentrace_jobs = job
-    gen_traces(str(config_path), str(input_path),
+    with Pool(num_emulators, pool_init_func, pool_init_args) as p:
+        it = p.imap(pool_worker_func, trace_jobs)
+        if log_progress and len(trace_jobs) / num_emulators > 50:
+            maindir_no, _ = nc.main_and_fuzzer_number(maindir)
+            it = tqdm(it, total=len(trace_jobs), desc=f"Main {maindir_no:3d}")
+        for _ in it:
+            pass
+
+    return len(trace_jobs)
+
+def pool_init_non_native(verbose, config_path, extra_args):
+    global pool_arg_verbose, pool_arg_config_path, pool_arg_extra_args
+    pool_arg_verbose, pool_arg_config_path, pool_arg_extra_args = verbose, config_path, extra_args
+
+def pool_init_forkserver_worker(verbose, config_path, extra_args, gen_bb_set, gen_mmio_set, gen_bb_hash, gen_bb_trace, gen_ram_trace, gen_mmio_trace, gen_interrupt_trace, gen_dma_trace):
+    global pool_state_gentrace_proc
+    pool_state_gentrace_proc = TraceGenProc(config_path, extra_args, gen_bb_set=gen_bb_set, gen_mmio_set=gen_mmio_set, gen_bb_hash=gen_bb_hash,
+                                        gen_bb_trace=gen_bb_trace, gen_ram_trace=gen_ram_trace, gen_mmio_trace=gen_mmio_trace, gen_interrupt_trace=gen_interrupt_trace, gen_dma_trace=gen_dma_trace, silent=not verbose)
+
+def pool_func_gen_traces_forkserver(job):
+    global pool_state_gentrace_proc
+    input_path, bbl_trace_path, ram_trace_path, mmio_trace_path, bbl_set_path, mmio_set_path, bbl_hash_path, interrupt_trace_path, dma_trace_path = job
+    if not pool_state_gentrace_proc.gen_trace(input_path, bbl_set_path, mmio_set_path, bbl_hash_path, bbl_trace_path, ram_trace_path, mmio_trace_path, interrupt_trace_path, dma_trace_path):
+        logger.error(f"\n\n[ERROR] Hit abrupt end while trying to execute input {input_path}\n")
+        exit(-1)
+
+def pool_func_gen_traces_new_proc(job):
+    global pool_arg_verbose, pool_arg_config_path, pool_arg_extra_args
+
+    input_path, bbl_trace_path, ram_trace_path, mmio_trace_path, bbl_set_path, mmio_set_path, bbl_hash_path, interrupt_trace_path, dma_trace_path = job
+    gen_traces(str(pool_arg_config_path), str(input_path),
         bbl_trace_path=bbl_trace_path, ram_trace_path=ram_trace_path, mmio_trace_path=mmio_trace_path,
         bbl_set_path=bbl_set_path, mmio_set_path=mmio_set_path, bbl_hash_path=bbl_hash_path,
-        extra_args=extra_args, silent=not verbose
+        interrupt_trace_path=interrupt_trace_path, dma_trace_path=dma_trace_path, extra_args=pool_arg_extra_args, silent=not pool_arg_verbose
     )
-    global num_processed
-    with num_processed.get_lock():
-        num_processed.value += 1
-        if log_progress:
-            if num_processed.value > 0 and num_processed.value % 50 == 0:
-                time_passed = round(time.time() - start_time)
-                relative_done = (num_processed.value+1) / num_gentrace_jobs
-                time_estimated = round((relative_done ** (-1)) * time_passed)
-                logger.info(f"[*] Processed {num_processed.value}/{num_gentrace_jobs} in {time_passed} seconds. Estimated seconds remaining: {time_estimated-time_passed}")
-
 
 def gen_all_missing_traces(projdir, trace_name_prefixes=None, log_progress=False, verbose=False, crashing_inputs=False, force_overwrite=False):
     if trace_name_prefixes is None:
@@ -242,13 +235,18 @@ class TraceGenProc:
     stable_bbset_path: Path = None
     stable_bbhash_path: Path = None
     stable_mmioset_path: Path = None
+    stable_bbtrace_path: Path = None
+    stable_ramtrace_path: Path = None
+    stable_mmiotrace_path: Path = None
+    stable_interrupt_trace_path: Path = None
+    stable_dma_trace_path: Path = None
 
     child_proc = None
     status_read_fd = None
     ctrl_write_fd = None
     config_path = None
 
-    def __init__(self, config_path, extra_args=None, gen_bb_set=False, gen_mmio_set=False, gen_bb_hash=False, base_path="/tmp", silent=False):
+    def __init__(self, config_path, extra_args=None, gen_bb_set=False, gen_mmio_set=False, gen_bb_hash=False, gen_bb_trace=False, gen_ram_trace=False, gen_mmio_trace=False, gen_interrupt_trace=False, gen_dma_trace=False, base_path="/tmp", silent=False):
         self.uuid = str(uuid.uuid4())
 
         self.stable_input_path = Path(os.path.join(base_path, ".trace_input_"+self.uuid))
@@ -258,11 +256,22 @@ class TraceGenProc:
             self.stable_bbhash_path = Path(os.path.join(base_path, ".trace_bbhash_"+self.uuid))
         if gen_mmio_set:
             self.stable_mmioset_path = Path(os.path.join(base_path, ".trace_mmioset_"+self.uuid))
+        if gen_bb_trace:
+            self.stable_bbtrace_path = Path(os.path.join(base_path, ".trace_bbtrace_"+self.uuid))
+        if gen_ram_trace:
+            self.stable_ramtrace_path = Path(os.path.join(base_path, ".trace_ramtrace_"+self.uuid))
+        if gen_mmio_trace:
+            self.stable_mmiotrace_path = Path(os.path.join(base_path, ".trace_mmiotrace_"+self.uuid))
+        if gen_interrupt_trace:
+            self.stable_interrupt_trace_path = Path(os.path.join(base_path, ".trace_interrupt_trace_"+self.uuid))
 
-        self.spawn_emulator_child(config_path, extra_args, gen_bb_set=gen_bb_set, gen_mmio_set=gen_mmio_set, gen_bb_hash=gen_bb_hash, silent=silent)
+        if gen_dma_trace:
+            self.stable_dma_trace_path = Path(os.path.join(base_path, ".trace_dma_trace_"+self.uuid))
+
+        self.spawn_emulator_child(config_path, extra_args, gen_bb_set=gen_bb_set, gen_mmio_set=gen_mmio_set, gen_bb_hash=gen_bb_hash, gen_bb_trace=gen_bb_trace, gen_ram_trace=gen_ram_trace, gen_mmio_trace=gen_mmio_trace, gen_interrupt_trace=gen_interrupt_trace,gen_dma_trace=gen_dma_trace,silent=silent)
 
     def destroy(self):
-        self.rm_old_links()
+        self.rm_links()
         self.kill_emulator_child()
 
     def __del__(self):
@@ -273,7 +282,7 @@ class TraceGenProc:
         except AttributeError:
             pass
 
-    def spawn_emulator_child(self, config_path, extra_args=None, gen_bb_set=False, gen_mmio_set=False, gen_bb_hash=False, silent=False):
+    def spawn_emulator_child(self, config_path, extra_args=None, gen_bb_set=False, gen_mmio_set=False, gen_bb_hash=False, gen_bb_trace=False, gen_ram_trace=False, gen_mmio_trace=False, gen_interrupt_trace=False, gen_dma_trace=False, silent=False):
         extra_args = extra_args or []
 
         if gen_bb_set:
@@ -282,8 +291,17 @@ class TraceGenProc:
             extra_args += ["--mmio-set-out", str(self.stable_mmioset_path)]
         if gen_bb_hash:
             extra_args += ["--bb-hash-out", str(self.stable_bbhash_path)]
+        if gen_bb_trace:
+            extra_args += ["--bb-trace-out", str(self.stable_bbtrace_path)]
+        if gen_ram_trace:
+            extra_args += ["--ram-trace-out", str(self.stable_ramtrace_path)]
+        if gen_mmio_trace:
+            extra_args += ["--mmio-trace-out", str(self.stable_mmiotrace_path)]
+        if gen_interrupt_trace:
+            extra_args += ["--interrupt-trace-out", str(self.stable_interrupt_trace_path)]
+        if gen_dma_trace:
+            extra_args += ["--dma-trace-out", str(self.stable_dma_trace_path)]
 
-        logger.debug(f"spawn_emulator_child setting up arguments {extra_args}")
         self.child_proc, self.ctrl_write_fd, self.status_read_fd = spawn_forkserver_emu_child(config_path, self.stable_input_path, extra_args, silent=silent)
 
     def kill_emulator_child(self):
@@ -300,20 +318,33 @@ class TraceGenProc:
             self.ctrl_write_fd = None
             self.child_proc = None
 
-    def rm_old_links(self):
-        for p in (self.stable_input_path, self.stable_bbset_path, self.stable_mmioset_path, self.stable_bbhash_path):
+    def rm_old_trace_links(self):
+        for p in (self.stable_bbset_path, self.stable_mmioset_path, self.stable_bbhash_path, self.stable_bbtrace_path, self.stable_ramtrace_path, self.stable_mmiotrace_path, self.stable_interrupt_trace_path, self.stable_dma_trace_path):
             if p is not None:
                 try:
                     p.unlink()
                 except FileNotFoundError:
                     pass
 
-    def setup_links(self, input_path, bb_set_path=None, mmio_set_path=None, bb_hash_path=None):
-        # Create Symlinks to input and output paths
-        self.rm_old_links()
+    def rm_input_link(self):
+        try:
+            self.stable_input_path.unlink()
+        except FileNotFoundError:
+            pass
+
+    def rm_links(self):
+        self.rm_input_link()
+        self.rm_old_trace_links()
+
+    def setup_input_link(self, input_path):
+        self.rm_input_link()
 
         # We always need an input
         self.stable_input_path.symlink_to(input_path)
+
+    def setup_trace_links(self, bb_set_path=None, mmio_set_path=None, bb_hash_path=None, bbl_trace_path=None, ram_trace_path=None, mmio_trace_path=None, interrupt_trace_path=None, dma_trace_path=None):
+        # Create Symlinks to input and output paths
+        self.rm_old_trace_links()
 
         # For output paths, we may not need to create all
         if bb_set_path:
@@ -322,11 +353,31 @@ class TraceGenProc:
             self.stable_mmioset_path.symlink_to(mmio_set_path)
         if bb_hash_path:
             self.stable_bbhash_path.symlink_to(bb_hash_path)
+        if bbl_trace_path:
+            self.stable_bbtrace_path.symlink_to(bbl_trace_path)
+        if ram_trace_path:
+            self.stable_ramtrace_path.symlink_to(ram_trace_path)
+        if mmio_trace_path:
+            self.stable_mmiotrace_path.symlink_to(mmio_trace_path)
+        if interrupt_trace_path:
+            self.stable_interrupt_trace_path.symlink_to(interrupt_trace_path)
+        if dma_trace_path:
+            self.stable_dma_trace_path.symlink_to(dma_trace_path)
 
-    def gen_trace(self, input_path, bb_set_path=None, mmio_set_path=None, bb_hash_path=None):
+    def gen_trace(self, input_path, bb_set_path=None, mmio_set_path=None, bb_hash_path=None, bbl_trace_path=None, ram_trace_path=None, mmio_trace_path=None, interrupt_trace_path=None, dma_trace_path=None):
         # First set up symlinks to the input file and the trace destinations
-        self.setup_links(input_path, bb_set_path, mmio_set_path, bb_hash_path)
+        self.setup_trace_links(bb_set_path, mmio_set_path, bb_hash_path, bbl_trace_path, ram_trace_path, mmio_trace_path, interrupt_trace_path, dma_trace_path)
+        self.setup_input_link(input_path)
 
+        return self.trigger_trace_gen()
+
+    def gen_trace_no_trace_symlinks(self, input_path):
+        self.setup_input_link(input_path)
+        self.rm_old_trace_links()
+
+        return self.trigger_trace_gen()
+
+    def trigger_trace_gen(self):
         # And now, kick off child by sending go via control fd
         assert os.write(self.ctrl_write_fd, b"\0\0\0\0") == 4
 
@@ -339,55 +390,141 @@ class TraceGenProc:
         # We have been successful in case the expected amount of bytes are read
         return sock_read_len == 4
 
-class TraceGenWorker(rq.Worker): #pylint: disable=too-many-instance-attributes
+class TraceGenerator:
     last_config_path = None
 
     trace_proc: TraceGenProc = None
+    last_extra_args = None
+
+    need_bbl_set = False
+    need_mmio_set = False
+    need_bb_hash = False
+    need_bb_trace = False
+    need_ram_trace = False
+    need_mmio_trace = False
+    need_interrupt_trace = False
+    need_dma_trace = False
+
+    silent: bool = False
+
+    def __init__(self, silent=False):
+        self.silent = silent
 
     def __del__(self):
-        if self.trace_proc:
-            self.trace_proc.destroy()
-        try:
-            super().__del__()
-        except AttributeError:
-            pass
+        self.discard_trace_proc()
 
     def discard_trace_proc(self):
         if self.trace_proc:
             self.trace_proc.destroy()
             self.trace_proc = None
 
-    def execute_job(self, job, queue): #pylint: disable=inconsistent-return-statements
-        # self.set_state(WorkerStatus.BUSY)
-        kwargs = job.kwargs
-
-        bbl_set_path, mmio_set_path = kwargs.get(ARGNAME_BBL_SET_PATH, False), kwargs.get(ARGNAME_MMIO_SET_PATH)
-
-        # If we don't have exactly bbl and MMIO set generation, forward to original implementation
-        if (not bbl_set_path) or (not mmio_set_path) or \
-            any(kwargs.get(argname) for argname in FORKSERVER_UNSUPPORTED_TRACE_ARGS):
-            return super().execute_job(job, queue)
-
-        self.prepare_job_execution(job)
-        job.started_at = datetime.datetime.utcnow()
-
-        config_path, input_path = job.args
-        extra_args = kwargs.get(ARGNAME_EXTRA_ARGS, [])
+    def update_config(self, config_path, extra_args, gen_bb_set=False, gen_mmio_set=False, gen_bb_hash=False, gen_bb_trace=False, gen_ram_trace=False, gen_mmio_trace=False, gen_interrupt_trace=False, gen_dma_trace=False):
+        config_changed = False
+        if config_path != self.last_config_path:
+            logger.info(f"Config path changed from {self.last_config_path} to {config_path}")
+            self.last_config_path = config_path
+            config_changed = True
+        if extra_args != self.last_extra_args:
+            logger.info(f"Extra args changed from {self.last_extra_args} to {extra_args}")
+            self.last_extra_args = copy.copy(extra_args)
+            config_changed = True
+        is_trace_type_added = False
+        if not self.need_bbl_set and gen_bb_set:
+            self.need_bbl_set = gen_bb_set
+            is_trace_type_added = True
+        if not self.need_mmio_set and gen_mmio_set:
+            self.need_mmio_set = gen_mmio_set
+            is_trace_type_added = True
+        if not self.need_bb_hash and gen_bb_hash:
+            self.need_bb_hash = gen_bb_hash
+            is_trace_type_added = True
+        if not self.need_bb_trace and gen_bb_trace:
+            self.need_bb_trace = gen_bb_trace
+            is_trace_type_added = True
+        if not self.need_ram_trace and gen_ram_trace:
+            self.need_ram_trace = gen_ram_trace
+            is_trace_type_added = True
+        if not self.need_mmio_trace and gen_mmio_trace:
+            self.need_mmio_trace = gen_mmio_trace
+            is_trace_type_added = True
+        if not self.need_interrupt_trace and gen_interrupt_trace:
+            self.need_interrupt_trace = gen_interrupt_trace
+            is_trace_type_added = True
+        if not self.need_dma_trace and gen_dma_trace:
+            self.need_dma_trace = gen_dma_trace
+            is_trace_type_added = True
+        if is_trace_type_added:
+            logger.info(f"Got new required trace type")
+            config_changed = True
 
         # If we need to switch to another config, kill current emulator child process
-        if config_path != self.last_config_path:
-            logger.info(f"Discarding current trace process due to changed config path. Config changed from {self.last_config_path} to {config_path}")
+        if config_changed:
+            logger.info(f"Discarding current trace process")
             self.discard_trace_proc()
-            self.last_config_path = config_path
 
         # If we do not have a child process already, create one now
         if self.trace_proc is None:
             logger.info(f"Creating new trace process for config path {config_path}")
             # Start child process
-            self.trace_proc = TraceGenProc(config_path, extra_args, gen_bb_set=True, gen_mmio_set=True)
+            self.trace_proc = TraceGenProc(config_path, extra_args, gen_bb_set=self.need_bbl_set, gen_mmio_set=self.need_mmio_set, gen_bb_hash=self.need_bb_hash,
+                                        gen_bb_trace=self.need_bb_trace, gen_ram_trace=self.need_ram_trace, gen_mmio_trace=self.need_mmio_trace, gen_interrupt_trace=self.need_interrupt_trace, gen_dma_trace=self.need_dma_trace, silent=self.silent)
 
-        success = self.trace_proc.gen_trace(input_path, bbl_set_path, mmio_set_path)
-        job.ended_at = datetime.datetime.utcnow()
+    def gen_trace(self, config_path, extra_args, input_path, bbl_set_path, mmio_set_path, bbl_hash_path, bbl_trace_path, ram_trace_path, mmio_trace_path, interrupt_trace_path, dma_trace_path):
+        self.update_config(config_path, extra_args, gen_bb_set=bbl_set_path is not None, gen_mmio_set=mmio_set_path is not None, gen_bb_hash=bbl_hash_path is not None,
+            gen_bb_trace=bbl_trace_path is not None, gen_ram_trace=ram_trace_path is not None, gen_mmio_trace=mmio_trace_path is not None, gen_interrupt_trace=interrupt_trace_path is not None, gen_dma_trace=dma_trace_path is not None)
+
+        success = self.trace_proc.gen_trace(input_path, bbl_set_path, mmio_set_path, bbl_hash_path, bbl_trace_path, ram_trace_path, mmio_trace_path, interrupt_trace_path, dma_trace_path)
+
+        return success
+
+    def gen_temp_trace(self, config_path, extra_args, input_path, gen_bb_set=False, gen_mmio_set=False, gen_bb_hash=False, gen_bb_trace=False, gen_ram_trace=False, gen_mmio_trace=False, gen_interrupt_trace=False, gen_dma_trace=False):
+        self.update_config(config_path, extra_args, gen_bb_set, gen_mmio_set, gen_bb_hash, gen_bb_trace, gen_ram_trace, gen_mmio_trace, gen_interrupt_trace, gen_dma_trace)
+
+        success = self.trace_proc.gen_trace_no_trace_symlinks(input_path)
+
+        return success
+
+
+class TraceGenWorker(rq.Worker): #pylint: disable=too-many-instance-attributes
+    trace_gen: TraceGenerator = None
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.trace_gen = TraceGenerator()
+
+    def __del__(self):
+        if self.trace_gen:
+            self.trace_gen.discard_trace_proc()
+        try:
+            super().__del__()
+        except AttributeError:
+            pass
+
+    def execute_job(self, job, queue): #pylint: disable=inconsistent-return-statements
+        """ Execute a generation job. This can be either
+        - a trace generation job
+        - or a state generation job
+        """
+        kwargs = job.kwargs
+
+        # For state generation and non-forkserver traces, forward to original implementation
+        if queue.name == nc.REDIS_QUEUE_NAME_STATE_GEN_JOBS or \
+            any(kwargs.get(argname) for argname in FORKSERVER_UNSUPPORTED_TRACE_ARGS):
+            return super().execute_job(job, queue)
+
+        bbl_set_path, mmio_set_path, bbl_hash_path = kwargs.get(ARGNAME_BBL_SET_PATH, None), kwargs.get(ARGNAME_MMIO_SET_PATH, None), kwargs.get(ARGNAME_BBL_HASH_PATH, None)
+        bbl_trace_path, ram_trace_path, mmio_trace_path = kwargs.get(ARGNAME_BBL_TRACE_PATH, None), kwargs.get(ARGNAME_RAM_TRACE_PATH, None), kwargs.get(ARGNAME_MMIO_TRACE_PATH, None)
+        interrupt_trace_path = kwargs.get(ARGNAME_INTERRUPT_TRACE_PATH, None)
+        dma_trace_path = kwargs.get(ARGNAME_DMA_TRACE_PATH, None)
+
+        self.prepare_job_execution(job)
+        job.started_at = datetime.datetime.now(datetime.timezone.utc)
+
+        config_path, input_path = job.args
+        extra_args = kwargs.get(ARGNAME_EXTRA_ARGS, [])
+
+        success = self.trace_gen.gen_trace(config_path, extra_args, input_path, bbl_set_path, mmio_set_path, bbl_hash_path, bbl_trace_path, ram_trace_path, mmio_trace_path, interrupt_trace_path, dma_trace_path)
+        job.ended_at = datetime.datetime.now(datetime.timezone.utc)
         logger.info(f"Generated traces for {os.path.basename(input_path)} in {(job.ended_at-job.started_at).microseconds} us")
         if success:
             # Job success
@@ -402,7 +539,6 @@ class TraceGenWorker(rq.Worker): #pylint: disable=too-many-instance-attributes
 
             # The emulator is likely in a bad state now, kill child
             logger.warning(f"[Trace Gen Job] got a failed tracing job (which ran from {job.started_at} to {job.ended_at}). closing file pipe FDs for kill + respawn.")
-            self.trace_proc.destroy()
-            self.trace_proc = None
+            self.trace_gen.discard_trace_proc()
 
         self.set_state(WorkerStatus.IDLE)

@@ -1,0 +1,41 @@
+descriptors:
+- # Location
+  addr: +0x40001400        # Initial location. Required for descriptor root objects
+  type: pointer           # (Optional) defaults to 'pointer' for 'descriptors' root objects
+  known_values: # (Optional) known valid locations, treat pointer as invalid if not one of these locations. If not specified, all locations are valid
+  - 0x20001234
+  - 0x20005678
+  target_offset: 0        # (Optional) offset to the target
+  to:
+    type: descriptor      # (Optional) defaults to 'descriptor' for non-root objects
+    typedef: my_list_linked_list_element # (Optional) create custom type name for (self/circular) referencing
+    fields:
+    # Pointer to next linked-list object
+    - offset: 0 # (Optional) implied offset 0 for first field
+      # Pointer
+      type: pointer
+      # For further pointer attributes, see root element description
+      to:
+        type: my_list_linked_list_element
+
+    # Fuzzer-controlled metadata
+    - offset: 4
+      type: status
+      size: 4 # Size in bytes of the metadata field. Default: 4
+      mask: 0xffffffff # bitmask of fuzzer-controlled field bits. Default: full field
+
+    # Pointer to buffer
+    - offset: 8 # (Optional) implied by offset and size of previous field
+      type: pointer
+      to:
+        type: buffer
+        # No more fields, the size is retrieved from known_sizes
+
+    # Inline buffer
+    - offset: 0xc # (Optional) implied by offset and size of previous field
+      # TODO: in-line buffer size also taken from known sizes?
+      type: buffer
+known_sizes:
+  +0xabcde:
+    min: 123
+    max: 345

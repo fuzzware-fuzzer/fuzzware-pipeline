@@ -1,0 +1,20 @@
+[package]
+name = "detect_dma"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+regex = "*"
+itertools = "*"
+serde = { version = "1.0.175", features = ["derive", "rc"] }
+serde_yaml = "0.8.26"
+indexmap = { version = "2.0.0", features = ["serde", "std"] }
+anyhow = "*"
+memchr = "*"
+memmap = "*"
+endiannezz = "*"
+clap = { version = "*", features = ["derive"]}
+log = "0.4.22"
+env_logger = "0.11.5"
+fxhash = "0.2.1"
+bincode = "1.3.3"

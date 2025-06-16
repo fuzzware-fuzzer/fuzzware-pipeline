@@ -6,21 +6,25 @@ from math import ceil
 
 import redis
 import rq
-from fuzzware_pipeline.logging_handler import logging_handler
+from ..logging_handler import logging_handler
 
 from ..const import (RQ_JOB_FAILURE_TTL, RQ_JOB_TTL, RQ_MODELING_JOB_TIMEOUT,
-                     RQ_RESULT_TTL, RQ_STATEGEN_JOB_TIMEOUT)
+                     RQ_RESULT_TTL, RQ_STATEGEN_JOB_TIMEOUT,
+                     RQ_DMA_SUMMARY_JOB_TIMEOUT, RQ_DMA_SNIPPET_JOB_TIMEOUT)
 from ..naming_conventions import (REDIS_QUEUE_NAME_MODELING,
                                   REDIS_QUEUE_NAME_STATE_GEN_JOBS,
                                   REDIS_QUEUE_NAME_TRACE_GEN_JOBS,
-                                  RQ_DUMP_FILE, SESS_FILENAME_CONFIG,
+                                  REDIS_QUEUE_NAME_DMA_GEN_SNIPPET,
+                                  REDIS_QUEUE_NAME_DMA_MODELING,
+                                  SESS_FILENAME_CONFIG,
                                   class_path, find_modeling_venv,
                                   get_input_path_components,
                                   mmio_state_name_prefix_for_input_path,
-                                  trace_paths_for_input)
+                                  trace_paths_for_input,
+                                  dma_snippet_path_for_input_path)
 from .. import naming_conventions as nc
-from ..util.eval_utils import add_job_timing_entries
-from ..workers import stategen, tracegen
+from ..util.eval_utils import add_job_timing_entries, add_dma_snipgen_perf_entries
+from ..workers import stategen, tracegen, dma_detect
 
 logger = logging_handler().get_logger("pipeline")
 
@@ -30,9 +34,10 @@ REDIS_PORT_RANGE_START = 2048
 REDIS_PORT_RANGE_END = 60000
 REDIS_PORT_RETRIES = 100
 MMIO_MODELING_INCLUDE_PATH = "fuzzware_modeling.analyze_mmio.analyze_mmio_and_store"
+JOB_FUNC_NAME_GEN_DMA_SNIPPET = "dma_detect.gen_dma_snippet"
 
 class WorkerPool:
-    parent: None # : Pipeline
+    parent: "Pipeline"
     conn: redis.Redis
     redis_port: int
     db_proc: subprocess.Popen
@@ -43,11 +48,14 @@ class WorkerPool:
     job_queue_trace_gen: rq.Queue
     job_queue_state_gen: rq.Queue
     job_queue_modeling: rq.Queue
+    job_queue_dma_snippet_gen: rq.Queue
+    job_queue_dma_modeling: rq.Queue
 
     def __init__(self, parent, write_logs):
         self.worker_procs = {
             REDIS_QUEUE_NAME_TRACE_GEN_JOBS: [],
-            REDIS_QUEUE_NAME_MODELING: []
+            REDIS_QUEUE_NAME_MODELING: [],
+            REDIS_QUEUE_NAME_DMA_GEN_SNIPPET: [],
         }
         self.parent = parent
         self.jobs = []
@@ -71,6 +79,8 @@ class WorkerPool:
         self.job_queue_trace_gen = rq.Queue(REDIS_QUEUE_NAME_TRACE_GEN_JOBS, connection=self.conn)
         self.job_queue_state_gen = rq.Queue(REDIS_QUEUE_NAME_STATE_GEN_JOBS, connection=self.conn)
         self.job_queue_modeling = rq.Queue(REDIS_QUEUE_NAME_MODELING, connection=self.conn)
+        self.job_queue_dma_snippet_gen = rq.Queue(REDIS_QUEUE_NAME_DMA_GEN_SNIPPET, connection=self.conn)
+        self.job_queue_dma_modeling = rq.Queue(REDIS_QUEUE_NAME_DMA_MODELING, connection=self.conn)
 
         self.spawn_workers(self.parent.num_main_fuzzer_procs)
         time.sleep(1)
@@ -137,6 +147,15 @@ class WorkerPool:
         if not burst:
             self.worker_procs[REDIS_QUEUE_NAME_MODELING].append(worker_proc)
 
+    def spawn_dma_detection_worker(self):
+        if self.write_logs:
+            logger.info("[WorkerPool] enabling logging for dma detection worker!")
+            stdout_path = open(self.worker_log_path(REDIS_QUEUE_NAME_DMA_GEN_SNIPPET), "w")
+        else:
+            stdout_path = subprocess.DEVNULL
+
+        self.worker_procs[REDIS_QUEUE_NAME_DMA_GEN_SNIPPET].append(subprocess.Popen(["python3", "-m", "rq.cli", "worker", "--url", f"redis://localhost:{self.redis_port}", "-q", "-w",  class_path(dma_detect.DMADetectWorker), REDIS_QUEUE_NAME_DMA_GEN_SNIPPET, REDIS_QUEUE_NAME_DMA_MODELING], stdout=stdout_path, stdin=subprocess.DEVNULL, stderr=subprocess.STDOUT)) #pylint: disable=consider-using-with
+
     def start_redis(self):
         logger.info("[WorkerPool] Starting redis server")
 
@@ -181,8 +200,16 @@ class WorkerPool:
                 logger.info("[WorkerPool] Spawning additional gen worker")
                 self.spawn_gen_worker()
 
+        if self.parent.enable_dma_detection:
+            num_running_dma_detect_workers = len(rq.Worker.all(queue=self.job_queue_dma_snippet_gen))
+            num_req_dma_detect_workers = max(ceil(num_fuzzer_procs / 4), 1)
+            if num_req_dma_detect_workers > num_running_dma_detect_workers:
+                for _ in range(num_req_dma_detect_workers - num_running_dma_detect_workers):
+                    logger.info("[WorkerPool] Spawning additional dma detection worker")
+                    self.spawn_dma_detection_worker()
+
     def shutdown(self, hard=False):
-        logger.info("[WorkerPool] Killing workers")
+        logger.info(f"[WorkerPool] Killing workers {'hard' if hard else 'soft'}")
 
         if hard:
             for queue_name, procs in self.worker_procs.items():
@@ -214,9 +241,9 @@ class WorkerPool:
         input_path = os.path.abspath(input_path)
 
         _, session_name, _, _, _ = get_input_path_components(input_path)
-        bbl_trace_path, ram_trace_path, mmio_trace_path, bbl_set_path, mmio_set_path, _ = trace_paths_for_input(input_path)
+        bbl_trace_path, ram_trace_path, mmio_trace_path, bbl_set_path, mmio_set_path, interrupt_trace_path, dma_trace_path = trace_paths_for_input(input_path)
         if not self.parent.do_full_tracing:
-            bbl_trace_path, ram_trace_path, mmio_trace_path = None, None, None
+            bbl_trace_path, ram_trace_path, mmio_trace_path, interrupt_trace_path, dma_trace_path = None, None, None, None, None
 
         config_path = os.path.join(self.parent.base_dir, session_name, SESS_FILENAME_CONFIG)
         self.jobs.append(self.job_queue_trace_gen.enqueue(tracegen.gen_traces, config_path, input_path,
@@ -225,6 +252,8 @@ class WorkerPool:
             mmio_trace_path=mmio_trace_path,
             bbl_set_path=bbl_set_path,
             mmio_set_path=mmio_set_path,
+            interrupt_trace_path=interrupt_trace_path,
+            dma_trace_path=dma_trace_path,
             extra_args=self.parent.curr_main_session.extra_runtime_args,
             result_ttl=RQ_RESULT_TTL, ttl=RQ_JOB_TTL, failure_ttl=RQ_JOB_FAILURE_TTL
         ))
@@ -256,6 +285,28 @@ class WorkerPool:
             result_ttl=RQ_RESULT_TTL, ttl=RQ_JOB_TTL, failure_ttl=RQ_JOB_FAILURE_TTL, job_timeout=RQ_MODELING_JOB_TIMEOUT
         ))
 
+    def enqueue_job_gen_dma_snippet(self, input_path, use_python_version: bool, snip_format: str):
+        input_path = os.path.abspath(input_path)
+
+        config_path = self.parent.curr_main_config_path
+        extra_args = self.parent.curr_main_session.extra_runtime_args
+
+        out_path = dma_snippet_path_for_input_path(input_path, proj_dir_path=self.parent.base_dir)
+
+        self.jobs.append(self.job_queue_dma_snippet_gen.enqueue(JOB_FUNC_NAME_GEN_DMA_SNIPPET, config_path, extra_args,
+            input_path, out_path, snip_format, use_python_version,
+            result_ttl=RQ_RESULT_TTL, ttl=RQ_JOB_TTL, failure_ttl=RQ_JOB_FAILURE_TTL, job_timeout=RQ_DMA_SNIPPET_JOB_TIMEOUT
+        ))
+
+    def enqueue_job_evaluate_dma_snippets(self, output_path, use_python_version: bool, snip_format: str):
+        config_path = self.parent.curr_main_config_path
+        dma_snippet_dir_path = self.parent.dma_snippets_dir
+
+        self.jobs.append(self.job_queue_dma_modeling.enqueue(dma_detect.evaluate_dma_snippets, config_path,
+            dma_snippet_dir_path, output_path, snip_format, use_python_version,
+            result_ttl=RQ_RESULT_TTL, ttl=RQ_JOB_TTL, failure_ttl=RQ_JOB_FAILURE_TTL, job_timeout=RQ_DMA_SUMMARY_JOB_TIMEOUT
+        ))
+
     def clean_lost_jobs(self):
         to_delete = []
         for job in self.jobs:
@@ -271,6 +322,8 @@ class WorkerPool:
     def collect_job_timings(self, max_jobs=-1):
         # do this at most every second or if we looped for quite a bit so we don't lose jobs
         new_job_timing_entries = []
+        new_dma_snippet_perf_entries = []
+
         num_queried = 0
         for job in self.jobs:
             num_queried += 1
@@ -286,6 +339,12 @@ class WorkerPool:
                     self.parent.add_warning_line("job failed: {}, started at: {}, args: {}, exc_info: {}".format(job.func_name, job.started_at, job.args, job.exc_info))
                 self.jobs.remove(job)
                 new_job_timing_entries.append((job.func_name, job_status, job.enqueued_at, job.started_at, job.ended_at))
+                if job.func_name == JOB_FUNC_NAME_GEN_DMA_SNIPPET:
+                    perf_meta = job.return_value()
+                    if perf_meta is None:
+                        logger.warning(f"DMA snipgen job has no result. Job: {job} ({repr(job)})")
+                    else:
+                        new_dma_snippet_perf_entries.append(perf_meta)
 
             if max_jobs != -1 and num_queried > max_jobs:
                 # If we are busy, don't spend too much time housekeeping
@@ -294,6 +353,10 @@ class WorkerPool:
         if new_job_timing_entries:
             add_job_timing_entries(self.parent.job_timings_file, new_job_timing_entries)
             self.parent.job_timings_file.flush()
+
+        if new_dma_snippet_perf_entries:
+            add_dma_snipgen_perf_entries(self.parent.dma_snipgen_perf_file, new_dma_snippet_perf_entries)
+            self.parent.dma_snipgen_perf_file.flush()
 
     def check_lost_jobs(self):
         for i in range(min(len(self.jobs), 3)):

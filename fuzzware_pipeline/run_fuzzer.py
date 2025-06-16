@@ -81,6 +81,6 @@ def run_fuzzer(target_args, input_dir, output_dir, fuzzer_no=1, fuzzers_total=1,
     if silent:
         proc = subprocess.Popen(full_args, env={**os.environ, **{'AFL_SKIP_CRASHES': '1'}}, stdout=subprocess.DEVNULL, stdin=subprocess.DEVNULL, stderr=subprocess.DEVNULL) #pylint: disable=consider-using-with
     else:
-        proc = subprocess.Popen(full_args, env={**os.environ, **{'AFL_SKIP_CRASHES': '1'}}) #pylint: disable=consider-using-with
+        proc = subprocess.Popen(full_args, env={**os.environ, **{'AFL_SKIP_CRASHES': '1', 'AFL_NO_UI': '1', 'AFL_DEBUG_CHILD': '1'}}) #pylint: disable=consider-using-with
 
     return full_args, proc

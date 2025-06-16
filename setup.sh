@@ -7,4 +7,7 @@ echo "[*] Installing pipeline..."
 pip3 install -U -r requirements.txt || exit 1
 pip3 install -e . || exit 1
 
+# 2. compile dma modeling
+cargo build --release --manifest-path dma_modeling/Cargo.toml
+
 exit 0

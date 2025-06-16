@@ -353,7 +353,8 @@ def add_mem_map(config_basedir, config_map, binary_path, elf_path, ivt_offset):
             "ivt_offset" : ivt_offset,
             # get the relative path
             "file": str(pathlib.Path(binary_path).relative_to(pathlib.Path(config_basedir))),
-            "permissions": "r-x"
+            "permissions": "r-x",
+            "is_entry": True,
         }
 
     if elf_path:

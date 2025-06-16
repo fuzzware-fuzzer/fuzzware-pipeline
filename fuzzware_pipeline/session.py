@@ -15,6 +15,7 @@ from .naming_conventions import (SESS_DIRNAME_BASE_INPUTS,
                                  SESS_DIRNAME_FUZZERS,
                                  SESS_DIRNAME_TEMP_MINIMIZATION,
                                  SESS_DIRNAME_TRACES, SESS_FILENAME_CONFIG,
+                                 SESS_DIRNAME_DMA_CFG_CANDIDATES,
                                  SESS_FILENAME_EXTRA_ARGS,
                                  SESS_FILENAME_FMT_FUZZER_N,
                                  SESS_FILENAME_PREFIX_INPUT,
@@ -23,8 +24,10 @@ from .naming_conventions import (SESS_DIRNAME_BASE_INPUTS,
                                  SESS_FILENAME_TEMP_MMIO_TRACE,
                                  SESS_FILENAME_TEMP_PREFIX_INPUT,
                                  SESS_FILENAME_CUR_INPUT)
+from . import naming_conventions as nc
 from .observers.new_fuzz_input_handler import NewFuzzInputHandler
 from .observers.new_trace_file_handler import NewTraceFileHandler
+from .observers.new_dma_cfg_candidate_handler import NewDMACandidateConfigHandler
 from .run_fuzzer import run_corpus_minimizer
 from .run_target import gen_run_arglist, run_target
 from .util.config import save_config, save_extra_args
@@ -37,7 +40,7 @@ logger = logging_handler().get_logger("pipeline")
 
 class Session:
     name: str
-    parent: None  # Pipeline
+    parent: "Pipeline"
     timeout: int
 
     # Cached here, but present by convention:
@@ -50,8 +53,11 @@ class Session:
     fuzzers = [] # list(LocalFuzzerInstance)
     input_observer: Observer
     trace_observer: Observer
+    dma_candidate_cfg_observer: Observer
 
-    def __init__(self, parent, name, num_fuzzers, config_map, extra_runtime_args = None):
+    num_dma_cfg_candidates = 0
+
+    def __init__(self, parent, name, num_fuzzers, config_map, extra_runtime_args = None, verbose=False):
         self.parent = parent
         self.name = name
         self.num_fuzzer_procs = num_fuzzers
@@ -60,7 +66,9 @@ class Session:
         self.prefix_input_path = None
         self.input_observer = Observer()
         self.trace_observer = Observer()
+        self.dma_candidate_cfg_observer = Observer()
         self.latest_activity = None
+        self.verbose = verbose
 
         assert "_" not in name
 
@@ -82,6 +90,10 @@ class Session:
     @property
     def config_path(self) -> str:
         return join(self.base_dir, SESS_FILENAME_CONFIG)
+
+    @property
+    def dma_candidate_dir(self) -> str:
+        return join(self.base_dir, SESS_DIRNAME_DMA_CFG_CANDIDATES)
 
     @property
     def extra_args_path(self) -> str:
@@ -116,6 +128,9 @@ class Session:
         if self.num_fuzzer_procs == 1:
             os.mkdir(self.fuzzers_dir)
 
+        if self.parent.enable_dma_detection:
+            os.mkdir(self.dma_candidate_dir)
+
     def create_files(self, config_map):
         save_config(config_map, self.config_path)
 
@@ -134,7 +149,7 @@ class Session:
         fuzzer = LocalFuzzerInstance(self, fuzzer_num, use_aflpp=self.parent.use_aflpp)
         logger.info("Appending fuzzer: {}".format(fuzzer))
         self.fuzzers.append(fuzzer)
-        return fuzzer.start(silent=True)
+        return fuzzer.start(silent=not self.verbose)
 
     def get_booting_prefix_size(self, input_path):
         """
@@ -294,9 +309,10 @@ class Session:
                 run_target(self.config_path, first_file(self.base_input_dir), self.extra_runtime_args + [ "-v" ])
                 logger.warning("[TRIAGING STEP 2] ... Output end\n")
 
-                logger.warning("\n\n[TRIAGING STEP 3] Re-running single emulation run with .cur_input file, showing its output...")
-                run_target(self.config_path, self.fuzzer_cur_input_path(instance.inst_num), self.extra_runtime_args + [ "-v" ])
-                logger.warning("[TRIAGING STEP 3] ... Output end\n")
+                if not self.parent.use_aflpp:
+                    logger.warning("\n\n[TRIAGING STEP 3] Re-running single emulation run with .cur_input file, showing its output...")
+                    run_target(self.config_path, self.fuzzer_cur_input_path(instance.inst_num), self.extra_runtime_args + [ "-v" ])
+                    logger.warning("[TRIAGING STEP 3] ... Output end\n")
 
                 return False
 
@@ -306,6 +322,10 @@ class Session:
             self.add_trace_watch(fuzzer)
         self.input_observer.start()
         self.trace_observer.start()
+
+        if self.parent.enable_dma_detection:
+            self.add_dma_cfg_cand_watch()
+            self.dma_candidate_cfg_observer.start()
 
         # Add the initial inputs for trace generation
         for path in queue_paths:
@@ -352,6 +372,8 @@ class Session:
             self.input_observer.stop()
         if self.trace_observer:
             self.trace_observer.stop()
+        if self.dma_candidate_cfg_observer:
+            self.dma_candidate_cfg_observer.stop()
         if not hard:
             if self.input_observer:
                 try:
@@ -363,8 +385,14 @@ class Session:
                     self.trace_observer.join()
                 except RuntimeError:
                     pass
+            if self.dma_candidate_cfg_observer:
+                try:
+                    self.dma_candidate_cfg_observer.join()
+                except RuntimeError:
+                    pass
         self.input_observer = None
         self.trace_observer = None
+        self.dma_candidate_cfg_observer = None
 
     def shutdown(self, hard=False):
         self.kill_fuzzers(hard)
@@ -387,6 +415,12 @@ class Session:
 
         logger.info("Observing trace dir: {}".format(observed_dir))
         self.trace_observer.schedule(NewTraceFileHandler(self.parent.queue_traces), path=observed_dir)
+
+    def add_dma_cfg_cand_watch(self):
+        observed_dir = self.dma_candidate_dir
+        assert os.path.exists(observed_dir)
+        logger.info("Observing directory '{}' now".format(observed_dir))
+        self.input_observer.schedule(NewDMACandidateConfigHandler(self.parent.queue_dma_config_candidates), path=observed_dir)
 
     @property
     def project_dir(self) -> str:
@@ -448,3 +482,6 @@ class Session:
                 pass
 
         return num_crashes
+
+    def __str__(self):
+        return self.name

@@ -10,6 +10,7 @@ from typing import Dict, List, Tuple
 from fuzzware_harness.tracing.serialization import parse_bbl_set
 from fuzzware_harness.util import parse_address_value
 from fuzzware_pipeline.logging_handler import logging_handler
+from ..dma.perf_meta import DMAJobPerfResult, DMAJobPerfSummary
 
 from ..naming_conventions import (PREFIX_BASIC_BLOCK_SET, PREFIX_MMIO_TRACE,
                                   fuzzer_dirs_for_main_dir,
@@ -41,8 +42,19 @@ def parse_job_datetime_string(time_string):
         timestamp = datetime.strptime(time_string, '%Y-%m-%d %H:%M:%S.%f')
         return timestamp
     except ValueError:
-        timestamp = datetime.strptime(date_string, '%Y-%m-%d %H:%M:%S')
+        pass
+    try:
+        timestamp = datetime.strptime(time_string, '%Y-%m-%d %H:%M:%S')
         return timestamp
+    except ValueError:
+        pass
+    try:
+        timestamp = datetime.strptime(time_string, '%Y-%m-%d %H:%M:%S%z')
+        return timestamp
+    except ValueError:
+        pass
+    timestamp = datetime.strptime(time_string, '%Y-%m-%d %H:%M:%S.%f%z')
+    return timestamp
 
 def parse_job_timings(job_timings_path):
     res = []
@@ -660,3 +672,75 @@ def collect_covered_basic_blocks(proj_dir_path, only_last_maindir=True, crashes=
             found.update(parse_bbl_set(trace_path))
 
     return found
+
+def add_dma_snipgen_perf_entries(file, entries: List[Tuple[str, DMAJobPerfResult]]):
+    for out_file_path, perf_data in entries:
+        file.write(f"{os.path.basename(out_file_path)} {perf_data.ram_trace_size} {perf_data.mmio_trace_size} {round(perf_data.seconds_trace_gen, 4)} {round(perf_data.seconds_snippet_gen, 4)}\n")
+
+def create_dma_perf_metadata_file(out_path):
+    f = open(out_path, "w")
+    f.write("# snip_filename ram_trace_size mmio_trace_size seconds_trace_gen seconds_snippet_gen\n")
+    return f
+
+def dump_dma_perf_metadata(out_path, results: List[Tuple[str, DMAJobPerfResult]]):
+    with create_dma_perf_metadata_file(out_path) as f:
+        add_dma_snipgen_perf_entries(f, results)
+
+def parse_dma_perf_metadata(path) -> List[Tuple[str, DMAJobPerfResult]]:
+    res = []
+
+    with open(path, "r") as f:
+        # Skip header
+        f.readline()
+        for line in f.readlines():
+            snip_filename, ram_trace_size, mmio_trace_size, seconds_trace_gen, seconds_snippet_gen = line.split(" ")
+            res.append((
+                snip_filename,
+                DMAJobPerfResult(
+                    int(ram_trace_size),
+                    int(mmio_trace_size),
+                    float(seconds_trace_gen),
+                    float(seconds_snippet_gen)
+                )
+            ))
+
+    return res
+
+MIN_INTERESTING_SNIPGEN_TIME = 0.1 # 100ms
+def summarize_dma_perf_metadata(results: List[Tuple[str, DMAJobPerfResult]], snippet_dir=".") -> DMAJobPerfSummary:
+    ram_trace_size_max = max([perf_data.ram_trace_size for _, perf_data in results])
+    ram_trace_size_avg = sum([perf_data.ram_trace_size for _, perf_data in results]) / len(results)
+
+    time_trace_gen = sum((perf_data.seconds_trace_gen for _, perf_data in results))
+    time_dma_snippet_gen = sum((perf_data.seconds_snippet_gen for _, perf_data in results))
+
+    max_time_trace_gen = max((perf_data.seconds_trace_gen for _, perf_data in results))
+    max_dma_snippet_gen = max((perf_data.seconds_snippet_gen for _, perf_data in results))
+
+    # For the factor, only consider potentially optimization-worthy generation times
+    try:
+        max_factor_trace_gen_to_dma_snip_gen, path_max_factor_trace_gen_to_dma_snip_gen = max(((perf_data.seconds_snippet_gen / perf_data.seconds_trace_gen, path) for path, perf_data in results if perf_data.seconds_snippet_gen > MIN_INTERESTING_SNIPGEN_TIME), key=lambda e: e[0])
+        path_max_factor_trace_gen_to_dma_snip_gen = os.path.join(snippet_dir, path_max_factor_trace_gen_to_dma_snip_gen)
+    except ValueError:
+        max_factor_trace_gen_to_dma_snip_gen, path_max_factor_trace_gen_to_dma_snip_gen = 0, f"<No snippet generation greater than {MIN_INTERESTING_SNIPGEN_TIME}s>"
+
+    avg_time_trace_gen = time_trace_gen / len(results)
+    avg_dma_snippet_gen = time_dma_snippet_gen / len(results)
+
+    return DMAJobPerfSummary(ram_trace_size_max, ram_trace_size_avg, time_trace_gen, time_dma_snippet_gen, max_time_trace_gen, max_dma_snippet_gen, avg_time_trace_gen, avg_dma_snippet_gen, max_factor_trace_gen_to_dma_snip_gen, path_max_factor_trace_gen_to_dma_snip_gen)
+
+def summarize_dma_perf_metadata_summaries(results: List[DMAJobPerfSummary]) -> DMAJobPerfSummary:
+    max_factor, max_factor_path = max(((entry.max_factor_trace_gen_to_dma_snip_gen, entry.path_max_factor_trace_gen_to_dma_snip_gen) for entry in results), key=lambda e: e[0])
+
+    return DMAJobPerfSummary(
+        max((entry.ram_trace_size_max for entry in results)),
+        sum((entry.ram_trace_size_avg for entry in results)) / len(results),
+        sum((entry.time_trace_gen for entry in results)),
+        sum((entry.time_dma_snippet_gen for entry in results)),
+        max((entry.max_time_trace_gen for entry in results)),
+        max((entry.max_dma_snippet_gen for entry in results)),
+        sum((entry.avg_time_trace_gen for entry in results)) / len(results),
+        sum((entry.avg_dma_snippet_gen for entry in results)) / len(results),
+        max_factor,
+        max_factor_path
+    )
