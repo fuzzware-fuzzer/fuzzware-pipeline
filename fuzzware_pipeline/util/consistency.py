@@ -7,7 +7,7 @@ from fuzzware_pipeline.logging_handler import logging_handler
 
 from ..naming_conventions import (determine_fuzzers_dirs_for_main_dir,
                                   main_dirs_for_proj)
-from ..run_fuzzer import AFL_CMIN
+from ..run_fuzzer import AFL_CMIN, afl_base_dir
 
 logger = logging_handler().get_logger("pipeline")
 
@@ -64,9 +64,9 @@ def duplicate_test_file(test_file):
     for i in range(4):
         shutil.copy(test_file, test_file+f"_{i}")
 
-def run_corpus_minimizer_for_fuzzer(fuzzer_test_output_path, config_file, verbose):
+def run_corpus_minimizer_for_fuzzer(fuzzer_test_output_path, config_file, verbose, use_aflpp=False):
     target_args = ['python3', '-m', 'fuzzware_harness.harness', '-m', '-c', str(config_file)]
-    minimizer_args = [AFL_CMIN, '-m', 'none', '-U', '-t', '1000', '-K', '-i']
+    minimizer_args = [os.path.join(afl_base_dir(use_aflpp), AFL_CMIN), '-m', 'none', '-U', '-t', '1000', '-K', '-i']
     minimizer_args.append(str(fuzzer_test_output_path))
     minimizer_args.append('-o')
     minimizer_args.append(str(os.path.join(fuzzer_test_output_path, "traces")))

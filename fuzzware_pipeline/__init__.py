@@ -239,10 +239,14 @@ def do_pipeline(args, leftover_args):
     if not os.path.exists(args.target_dir):
         logger.error("Target directory '{}' does not exist".format(args.target_dir))
         exit(1)
+    if args.out is None:
+        args.out = args.target_dir
 
     logger.info(f"Executing pipeline at {datetime.now()}")
-    logger.info(f"Got projdir: {args.target_dir}")
-
+    logger.info(f"Got base config directory: {args.target_dir}")
+    logger.info(f"Using config name: {args.runtime_config_name}")
+    logger.info(f"Got output directory: {args.out}")
+    logger.info(f"Using project name: {args.project_name}")
 
     if args.base_inputs is None:
         args.base_inputs = os.path.join(args.target_dir, "base_inputs")
@@ -270,7 +274,7 @@ def do_pipeline(args, leftover_args):
     timeout_seconds = sum(x * int(t) for x, t in zip([1, 60, 3600, 24*3600], reversed(args.run_for.split(":"))))
 
     status = 0
-    pipeline = Pipeline(args.target_dir, args.project_name, args.base_inputs, args.num_local_fuzzer_instances, args.disable_modeling, write_worker_logs=not args.silent_workers, do_full_tracing=args.full_traces, config_name=args.runtime_config_name, timeout_seconds=timeout_seconds, use_aflpp=args.aflpp)
+    pipeline = Pipeline(args.target_dir, args.project_name, args.out, args.base_inputs, args.num_local_fuzzer_instances, args.disable_modeling, write_worker_logs=not args.silent_workers, do_full_tracing=args.full_traces, config_name=args.runtime_config_name, timeout_seconds=timeout_seconds, use_aflpp=args.aflpp, milestone_limit=args.milestone_limit)
 
     try:
         if timeout_seconds != 0:
@@ -399,7 +403,27 @@ def do_replay(args, leftover_args):
         else:
             args.input = trace_paths[0]
 
-    if not os.path.exists(args.input):
+    proj_rel_input_path = os.path.join(project_path, args.input)
+    if os.path.isfile(args.input) or os.path.isfile(proj_rel_input_path):
+        # We got a trace or input file
+        if not os.path.isfile(args.input):
+            args.input = proj_rel_input_path
+
+        directory, _ = os.path.split(os.path.realpath(args.input))
+        if directory.endswith(nc.SESS_DIRNAME_QUEUE) or directory.endswith(nc.SESS_DIRNAME_CRASHES):
+            # input filename, just re-use this file
+            input_path = args.input
+        elif directory.endswith(nc.SESS_DIRNAME_TEMP_MINIMIZATION) or directory.endswith(nc.SESS_DIRNAME_BASE_INPUTS):
+            # input from base directory
+            input_path = args.input
+            config_path = os.path.join(directory, "..", "config.yml")
+        elif os.path.split(directory)[1].startswith(nc.SESS_DIRNAME_TRACES):
+            # trace filename, need to translate to input file path
+            input_path = input_for_trace_path(args.input)
+        else:
+            logger.error("Input path needs to be either an input or a trace file")
+            exit(1)
+    else:
         # We are dealing with a queue/crash input name or an input id instead. Look at fuzzer and main ids
         main_id, fuzzer_id = main_and_fuzzer_number(os.curdir)
 
@@ -445,22 +469,7 @@ def do_replay(args, leftover_args):
             logger.error("Could not find input for '{}' in {}".format(input_id, fuzzer_dir))
             exit(1)
         logger.info("Found input path: {}".format(input_path))
-    else:
-        # We got a trace or input file
-        directory, _ = os.path.split(os.path.realpath(args.input))
-        if directory.endswith(nc.SESS_DIRNAME_QUEUE) or directory.endswith(nc.SESS_DIRNAME_CRASHES):
-            # input filename, just re-use this file
-            input_path = args.input
-        elif directory.endswith(nc.SESS_DIRNAME_TEMP_MINIMIZATION) or directory.endswith(nc.SESS_DIRNAME_BASE_INPUTS):
-            # input from base directory
-            input_path = args.input
-            config_path = os.path.join(directory, "..", "config.yml")
-        elif os.path.split(directory)[1].startswith(nc.SESS_DIRNAME_TRACES):
-            # trace filename, need to translate to input file path
-            input_path = input_for_trace_path(args.input)
-        else:
-            logger.error("Input path needs to be either an input or a trace file")
-            exit(1)
+
     if config_path is None:
         config_path = config_for_input_path(input_path)
 
@@ -610,9 +619,10 @@ def do_cov(args, leftover_args):
                 print(f"{i+1:d}. {Path(nc.input_for_trace_path(path)).relative_to(working_directory)}")
         else:
             print("Could not find any traces (after skipping) that cover all requested bbs...")
+            exit(2)
     else:
         # By default, if no specific basic blocks are given, show information about symbols
-        symbol_bbs = set(bb & ~1 for bb in symbols.values())
+        symbol_bbs = set(bb & ~1 for bb in addr_to_sym)
 
         covered_bbs = collect_covered_basic_blocks(projdir, only_last_maindir=not args.all_main_dirs, crashes=args.crashes)
         if valid_bbs:
@@ -736,6 +746,7 @@ KNOWN_STATNAMES = [
 ]
 def do_genstats(args, leftover_args):
     from .util.config import load_config_deep
+    from fuzzware_harness.util import parse_symbols
     from .workers.tracegen import gen_all_missing_traces
     from .util import eval_utils
     from .output_conventions import \
@@ -746,6 +757,7 @@ def do_genstats(args, leftover_args):
     projdir = resolve_projdir(args.projdir)
     latest_config_path = config_file_for_main_path(main_dirs_for_proj(projdir)[-1])
     config_map = load_config_deep(latest_config_path)
+    symbols, _ = parse_symbols(config_map)
 
     if args.all:
         args.stats = KNOWN_STATNAMES
@@ -798,7 +810,7 @@ def do_genstats(args, leftover_args):
             exit(1)
 
         if os.path.exists(args.milestone_bb_file):
-            milestone_bbs = parse_milestone_bb_file(args.milestone_bb_file, self.symbols)
+            milestone_bbs = parse_milestone_bb_file(args.milestone_bb_file, symbols)
             not_yet_found_milestone_bbs = set(milestone_bbs)
 
         logger.info("Generating missing basic block set traces, if any")
@@ -970,6 +982,7 @@ def main():
     parser_pipeline.add_argument('target_dir', nargs="?", type=os.path.abspath, default=os.curdir, help="Directory containing the main config. Defaults to the current working dir.")
     parser_pipeline.add_argument('--runtime-config-name', default=nc.SESS_FILENAME_CONFIG, help=f"Main config yaml file name relative to target_dir. Defaults to '{nc.SESS_FILENAME_CONFIG}'.")
     parser_pipeline.add_argument('-p', '--project-name', default=nc.DEFAULT_PROJECT_NAME, help=f"Name of the fuzzing project directory where all the information (input corpus, traces, modeling, ...) regarding the run is stored. Defaults to '{nc.DEFAULT_PROJECT_NAME}'")
+    parser_pipeline.add_argument('-o', '--out', default=None, help=f"Directory to create the project directory in. This will result in <out>/<project-name>. Defaults to the target directory which contains the main config.")
     parser_pipeline.add_argument('-n', '--num-local-fuzzer-instances', default=1, type=int, help="Number of local fuzzer instances to use.")
     parser_pipeline.add_argument('--base-inputs', default=None, help="Directory containing the initial inputs to be used for fuzzing. If unspecified, uses simple default inputs.")
     parser_pipeline.add_argument('--run-for', default="00:00:00:00", help="Amount of time to run the pipeline for. Format: DD:HH:MM:SS")
@@ -978,6 +991,7 @@ def main():
     parser_pipeline.add_argument('--full-traces', default=False, action='store_true', help="Enable generating full traces instead of only generating the (much smaller) set-based traces.")
     parser_pipeline.add_argument('--skip-afl-cpufreq', default=False, action='store_true', help="Skip AFL's performance governor check by setting AFL_SKIP_CPUFREQ=1.")
     parser_pipeline.add_argument('--aflpp', default=False, action="store_true", help="Use AFLplusplus (instead of afl).")
+    parser_pipeline.add_argument('--milestone-limit', default=None, type=int, help="Fuzzer stops fuzzing after reaching MILESTONE_LIMIT milestones")
 
     # Bare-bone Fuzzer command-line arguments
     parser_fuzz.add_argument('out_subdir', help="The output subdirectory name to use.")

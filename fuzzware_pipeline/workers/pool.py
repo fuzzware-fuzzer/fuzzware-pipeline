@@ -296,7 +296,7 @@ class WorkerPool:
             self.parent.job_timings_file.flush()
 
     def check_lost_jobs(self):
-        for i in range(min(len(self.jobs), 10)):
+        for i in range(min(len(self.jobs), 3)):
             try:
                 job = self.jobs[i]
                 job.refresh()

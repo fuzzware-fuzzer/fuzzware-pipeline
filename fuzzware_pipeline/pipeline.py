@@ -26,6 +26,7 @@ from .const import (CONFIG_UPDATE_FORCE_FUZZER_RESTART_LIMIT,
                     FIRST_STAT_PRINT_DELAY, STAT_PRINT_INTERVAL)
 from .logging_handler import logging_handler
 from .naming_conventions import *  # pylint: disable=wildcard-import
+from . import naming_conventions as nc
 from .observers.new_config_snippet_handler import NewConfigSnippetHandler
 from .observers.new_mmio_state_handler import NewMmioStateHandler
 from .run_target import run_target
@@ -41,7 +42,7 @@ logger = logging_handler().get_logger("pipeline")
 
 class Pipeline:
     # Base configs
-    parent_dir: str
+    orig_config_dir: str
     name: str
     base_inputs: str
     num_main_fuzzer_procs: int
@@ -50,6 +51,7 @@ class Pipeline:
     boot_avoided_bbls: set
     groundtruth_valid_basic_blocks: set
     groundtruth_milestone_basic_blocks: set
+    milestone_limit: int
 
     # Runtime state
     start_time: int
@@ -89,10 +91,6 @@ class Pipeline:
     input_creation_times_file = None
     job_timings_file = None
     seen_rel_input_paths = set()
-
-    @property
-    def base_dir(self):
-        return os.path.join(self.parent_dir, self.name)
 
     @property
     def mmio_states_dir(self) -> str:
@@ -229,25 +227,31 @@ class Pipeline:
         if os.path.exists(milestone_bb_list_path):
             self.groundtruth_milestone_basic_blocks = parse_milestone_bb_file(milestone_bb_list_path, self.symbols)
 
-    def __init__(self, parent_dir, name, base_inputs, num_main_fuzzer_procs, disable_modeling=False, write_worker_logs=False, do_full_tracing=False, config_name=SESS_FILENAME_CONFIG, timeout_seconds=0, use_aflpp=False):
+    def __init__(self, orig_config_dir, name, out_dir, base_inputs, num_main_fuzzer_procs, disable_modeling=False, write_worker_logs=False, do_full_tracing=False, config_name=SESS_FILENAME_CONFIG, timeout_seconds=0, use_aflpp=False, milestone_limit=None):
         self.booted_bbl = DEFAULT_IDLE_BBL
         self.disable_modeling = disable_modeling
         self.shutdown_requested = False
         self.sessions = {}
-        self.parent_dir = parent_dir
+        self.orig_config_dir = orig_config_dir
         self.name = name
         self.num_main_fuzzer_procs = num_main_fuzzer_procs
         self.generic_inputs_dir = base_inputs
         self.do_full_tracing = do_full_tracing
         self.num_required_traces = len(SET_TRACE_FILENAME_PREFIXES) if not do_full_tracing else len(TRACE_FILENAME_PREFIXES) - 1
-        self.base_config_path = os.path.join(self.parent_dir, config_name)
+        self.base_config_path = os.path.join(self.orig_config_dir, config_name)
         self.groundtruth_valid_basic_blocks = None
         self.groundtruth_milestone_basic_blocks = None
         self.stop_time = None
         self.use_aflpp = use_aflpp
+        self.milestone_limit = milestone_limit
+        self.base_dir = os.path.join(out_dir, name)
 
         if not os.path.isfile(self.base_config_path):
             logger.error(f"Could not find config file: {self.base_config_path}. We are probably not in a target directory. Exiting...")
+            exit(1)
+
+        if not os.path.isdir(out_dir):
+            logger.error(f"Output directory does not exist: '{out_dir}'.")
             exit(1)
 
         self.queue_fuzz_inputs = Queue()
@@ -282,21 +286,23 @@ class Pipeline:
         save_config(config_map, new_config_path)
         assert os.path.isfile(new_config_path)
 
+        self.symbols, self.syms_by_addr = parse_symbols(config_map)
+        self.default_config_map = config_map
+
         # get pre-configured MMIO access contexts from configuration
         if 'mmio_models' in config_map:
             for _, entry_list in config_map['mmio_models'].items():
                 for entry in entry_list.values():
                     # Skip unexpected / custom entries
                     try:
-                        pc = entry.get('pc', MMIO_HOOK_PC_ALL_ACCESS_SITES)
+                        pc = parse_address_value(self.symbols, entry.get('pc', MMIO_HOOK_PC_ALL_ACCESS_SITES))
                     except AttributeError:
                         continue
-                    self.mmio_access_contexts.add((pc, entry['addr']))
                     if pc != MMIO_HOOK_PC_ALL_ACCESS_SITES:
+                        pc = pc & ~0x1
                         self.num_models_per_pc[pc] = self.num_models_per_pc.get(pc, 0) + 1
+                    self.mmio_access_contexts.add((pc, entry['addr']))
 
-        self.symbols, self.syms_by_addr = parse_symbols(config_map)
-        self.default_config_map = config_map
         self.parse_pipeline_yml_config(config_map)
         self.parse_ground_truth_files()
 
@@ -338,6 +344,11 @@ class Pipeline:
         self.copy_necessary_files(files_to_copy)
         return config_map
 
+    # Append milestone basic block to the log file
+    def milestone_log_append(self, milestone_bb: int):
+        with open(milestone_log_path_for_proj(self.base_dir), "a") as f:
+            f.write(f"0x{milestone_bb:08x}\n")
+
     # We store the planned run time as well as actual start time
     def runtime_log_create(self, planned_runtime):
         with open(runtime_log_path_for_proj(self.base_dir), "w") as f:
@@ -372,12 +383,12 @@ class Pipeline:
                         if os.path.isabs(entry['file']):
                             filename = entry['file']
                             files_to_copy.append(filename)
-                            config_map[item][name]['file'] = os.path.join("../data/", os.path.basename(entry['file']))
+                            config_map[item][name]['file'] = os.path.join(f"../{nc.SESS_DIRNAME_NECESSARY_FILES}/", os.path.basename(entry['file']))
                         else:
                             # the original config assumes the base dir, we are now in <base>/fuzzware-project/mainXXX
-                            config_map[item][name]['file'] = os.path.join("../data/", entry['file'])
+                            config_map[item][name]['file'] = os.path.join(f"../{nc.SESS_DIRNAME_NECESSARY_FILES}/", entry['file'])
                             filename = os.path.basename(entry['file'])
-                            files_to_copy.append(os.path.join(self.parent_dir, filename))
+                            files_to_copy.append(os.path.join(self.orig_config_dir, filename))
 
                         associated_elf = filename[:-4] + ".elf"
                         if os.path.isfile(associated_elf):
@@ -662,7 +673,11 @@ class Pipeline:
                                     logger.info(f"New translation block: 0x{pc:08x}{sym_suffix}")
                                 if self.groundtruth_milestone_basic_blocks and pc in self.groundtruth_milestone_basic_blocks:
                                     logger.info(f"Discovered milestone basic block: 0x{pc:08x}{sym_suffix}")
+                                    self.milestone_log_append(pc)
                                     self.visited_milestone_basic_blocks.add(pc)
+                                    # check if milestone threshold was reached
+                                    if self.milestone_limit and len(self.visited_milestone_basic_blocks) >= self.milestone_limit:
+                                        self.shutdown()
                             self.visited_translation_blocks |= new_bbs
 
                         if (not (self.curr_main_session.prefix_input_path or pending_prefix_candidate)) and self.is_successfully_booted(bbl_set):
@@ -708,7 +723,7 @@ class Pipeline:
                             pending_prefix_candidate = None
                             time_latest_new_basic_block = None
                         else:
-                            if idle_count % 10 == 0:
+                            if idle_count % 50 == 0:
                                 logger.info("Waiting for leftover jobs ({}) to finish...".format(len(self.worker_pool.jobs)))
                                 self.worker_pool.check_lost_jobs()
                     else:

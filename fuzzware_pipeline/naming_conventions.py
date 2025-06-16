@@ -44,6 +44,7 @@ PIPELINE_FILENAME_EMPTY_INPUT = ".empty_input"
 PIPELINE_FILENAME_VALID_BB_LIST = "valid_basic_blocks.txt"
 PIPELINE_FILENAME_CHECKPOINT_BBS = "milestone_bbs.txt"
 PIPELINE_FILENAME_RUNTIME_LOG = "runtime.txt"
+PIPELINE_FILENAME_MILESTONE_LOG = "milestone.log"
 
 STATS_FILENAME_COVERAGE_OVER_TIME = "covered_bbs_by_second_into_experiment.csv"
 STATS_FILENAME_MILESTONE_DISCOVERY_TIMINGS = "milestone_discovery_timings.csv"
@@ -293,6 +294,9 @@ def valid_basic_block_list_path_for_proj(proj_dir_path):
 
 def milestone_basic_block_list_path_for_proj(proj_dir_path):
     return os.path.join(proj_dir_path, SESS_DIRNAME_NECESSARY_FILES, PIPELINE_FILENAME_CHECKPOINT_BBS)
+
+def milestone_log_path_for_proj(proj_dir_path):
+    return os.path.join(proj_dir_path, PIPELINE_DIRNAME_LOGS, PIPELINE_FILENAME_MILESTONE_LOG)
 
 def runtime_log_path_for_proj(proj_dir_path):
     return os.path.join(proj_dir_path, PIPELINE_DIRNAME_LOGS, PIPELINE_FILENAME_RUNTIME_LOG)

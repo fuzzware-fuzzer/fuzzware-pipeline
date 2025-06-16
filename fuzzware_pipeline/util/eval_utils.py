@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Dict, List, Tuple
 
 from fuzzware_harness.tracing.serialization import parse_bbl_set
+from fuzzware_harness.util import parse_address_value
 from fuzzware_pipeline.logging_handler import logging_handler
 
 from ..naming_conventions import (PREFIX_BASIC_BLOCK_SET, PREFIX_MMIO_TRACE,
@@ -36,7 +37,12 @@ def add_job_timing_entries(file, entries):
         add_job_timing_entry(file, func_name, result_status, enqueue_time, start_time, end_time)
 
 def parse_job_datetime_string(time_string):
-    return datetime.strptime(time_string, '%Y-%m-%d %H:%M:%S.%f')
+    try:
+        timestamp = datetime.strptime(time_string, '%Y-%m-%d %H:%M:%S.%f')
+        return timestamp
+    except ValueError:
+        timestamp = datetime.strptime(date_string, '%Y-%m-%d %H:%M:%S')
+        return timestamp
 
 def parse_job_timings(job_timings_path):
     res = []
@@ -148,7 +154,6 @@ def valid_bbs_for_proj(projdir, valid_bb_path=None):
     return parse_valid_bb_file(valid_bb_path)
 
 def resolve_all(symbols, basic_blocks):
-    from fuzzware_harness.util import parse_address_value
     bbs = []
 
     for bb in basic_blocks:

@@ -37,8 +37,35 @@ def is_elf(path):
 def extract_elf(in_path, out_path):
     assert is_elf(in_path)
 
-    subprocess.check_call([OBJCOPY_UTIL, "-O", "binary", in_path, out_path])
+    with open(in_path, "rb") as in_file:
+        with open(out_path, "wb") as out_file:
+            elffile = ELFFile(in_file)
 
+            # extract all section that have an allocate flag
+            sections_to_map = dict([(x.header['sh_addr'], x.header['sh_offset']) for x in list(elffile.iter_sections()) if x.header['sh_flags'] & 0x2])
+            # and x.header['sh_type'] == "SHT_PROGBITS"  ])
+
+            # issue #53 fix #1
+            segment_offset = min([x.header['p_paddr'] for x in list(elffile.iter_segments()) if x['p_type'] == 'PT_LOAD' and x.header['p_filesz'] > 0 and x['p_vaddr'] in sections_to_map and sections_to_map[x['p_vaddr']] == x['p_offset']])
+
+            # only iterate segments that have at least on section mapped to them
+            valid_segments = [x for x in list(elffile.iter_segments()) if x['p_type'] == 'PT_LOAD' and x.header['p_filesz'] > 0 and x['p_vaddr'] in sections_to_map and sections_to_map[x['p_vaddr']] == x['p_offset']]
+            logger.info(f"Writing loadable binary contents to {out_path}")
+
+            for segment in valid_segments:
+                if segment['p_type'] == 'PT_LOAD' and segment.header['p_filesz'] > 0:
+                    print(segment['p_offset'])
+                    # issue #53 fix #2
+                    lowest_section = 0
+                    if segment['p_offset'] == 0:
+                        lowest_section = min([x['sh_offset'] for x in list(elffile.iter_sections()) if x['sh_size'] > 0])
+
+                    logger.info(
+                        f"Adding {segment.header['p_memsz'] - lowest_section} bytes at offset 0x{segment.header['p_paddr'] - segment_offset:08x}")
+                    out_file.seek(segment.header['p_paddr'] - segment_offset)
+                    out_file.write(segment.data()[lowest_section:])
+                    segment_offset += lowest_section # adjust offset
+            logger.info("Binary contents successfully extracted")
 
 
 def collect_pointers(binary_contents):
@@ -73,6 +100,7 @@ def has_ascii_at_offset(binary_contents, offset, min_len=8):
     if len(binary_contents) < offset + min_len:
         return False
     res = all(map(lambda ind: binary_contents[offset+ind] in PRINTABLE_ASCIIVALS, range(min_len)))
+    res = binary_contents[offset - 1] not in PRINTABLE_ASCIIVALS if (res and offset > 0) else res
     return res
 
 THUMB_OPC_PUSH = 0xB5
@@ -134,13 +162,10 @@ def find_text_mapping(binary_path):
     min_ptr, max_ptr = pointers[0], pointers[-1]
     _, _, aligned_reset_vector = min_ptr & (~PAGE_MASK), max_ptr & (~PAGE_MASK), reset_vector & (~PAGE_MASK)
     first_offset_candidate = -aligned_contents_len # -min(aligned_contents_len, aligned_min_ptr)
-    #print("first oc {:x}".format(first_offset_candidate))
-    #print("reset_vector {:x}".format(reset_vector))
     if (reset_vector - first_offset_candidate) < 0: #sanity check, necessary for certain boards
         first_offset_candidate = 0
-    #print("first oc {:x}".format(first_offset_candidate))
 
-    last_offset_candidate = aligned_contents_len
+    last_offset_candidate = PAGE_SIZE #aligned_contents_len
 
     matches_per_offset = {}
     for offset_candidate in range(first_offset_candidate, last_offset_candidate, PAGE_SIZE):
@@ -358,7 +383,15 @@ def gen_syms(elf_path):
 
             for _, symbol in enumerate(section.iter_symbols()):
                 if symbol.name and "$" not in symbol.name:
-                    res[symbol['st_value']] = symbol.name
+                    addr = symbol['st_value']
+
+                    if addr not in res:
+                        res[addr] = symbol.name
+                    else:
+                        existing_sym = res[addr]
+                        if type(existing_sym) == str:
+                            res[addr] = [existing_sym]
+                        res[addr].append(symbol.name)
 
     return res
 
