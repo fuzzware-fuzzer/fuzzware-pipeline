@@ -872,7 +872,7 @@ def do_genstats(args, leftover_args):
 
     if STATNAME_MMIO_OVERHEAD_ELIM in args.stats:
         logger.info("Generating full MMIO traces. This will take a while...")
-        tracegen_args = argparse.Namespace(dryrun=False, trace_types=["mmio"], fuzzers="1", main_dirs="latest", projdir=projdir, all=False, tracedir_postfix=None, verbose=False, crashes=False)
+        tracegen_args = argparse.Namespace(dryrun=False, trace_types=["mmio"], fuzzers="1", main_dirs="latest", projdir=projdir, all=False, tracedir_postfix=None, verbose=False, crashes=False, num_instances=args.num_instances)
         do_gentraces(tracegen_args, None)
 
         logger.info("Calculating MMIO overhead elimination. This could take a while...")
@@ -1024,6 +1024,7 @@ def main():
     parser_genstats.add_argument('--milestone-bb-file', default=None, help=f"A list of basic block addresses which represent some type of milestone for which we are interested in discovery timings. If not specified, will look for a file '{nc.PIPELINE_FILENAME_CHECKPOINT_BBS}'")
     parser_genstats.add_argument('-v', '--verbose', default=False, action="store_true", help="Prints output of emulator child if set.")
     parser_genstats.add_argument('-f', '--force-overwrite', default=False, action="store_true", help="Force re-generation of traces, deleting existing ones.")
+    parser_genstats.add_argument('-n', '--num-instances', default=1, type=int, help="Number of local emulator instances to use for generating traces.")
 
     # Replaytest command-line arguments
     parser_replaytest.add_argument('project_dir', type=os.path.abspath, help="Directory containing the main config")
