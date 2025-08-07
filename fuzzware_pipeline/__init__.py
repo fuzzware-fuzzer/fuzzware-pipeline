@@ -738,6 +738,7 @@ def do_genstats(args, leftover_args):
     from .util.config import load_config_deep
     from .workers.tracegen import gen_all_missing_traces
     from .util import eval_utils
+    from fuzzware_harness.util import parse_symbols
     from .output_conventions import \
         pc_lr_from_emu_output
 
@@ -798,7 +799,8 @@ def do_genstats(args, leftover_args):
             exit(1)
 
         if os.path.exists(args.milestone_bb_file):
-            milestone_bbs = parse_milestone_bb_file(args.milestone_bb_file, self.symbols)
+            symbols, _ = parse_symbols(config_map)
+            milestone_bbs = parse_milestone_bb_file(args.milestone_bb_file, symbols)
             not_yet_found_milestone_bbs = set(milestone_bbs)
 
         logger.info("Generating missing basic block set traces, if any")
