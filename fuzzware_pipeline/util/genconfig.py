@@ -199,6 +199,10 @@ def add_missing_regions(existing_mem_config, add_entries):
 
             # Need to extend next region backwards?
             if start < other_start <= end:
+                # skip .text section
+                if "file" in other_entry:
+                    logger.info(f"Skipping backward extension for file-backed region {other_rname}. Keeping new region separate.")
+                    continue 
                 logger.info(f"Setting start of region {other_rname} ({other_start:x}-{other_end:x}) to {start:x}")
                 prepend_size = other_start - start
                 other_start = start
